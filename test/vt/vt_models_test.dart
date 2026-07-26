@@ -107,12 +107,15 @@ void main() {
         'voiceId': 'v1',
         'audioUrl': 'https://example.com/a.mp3',
       });
+      final after = DateTime.now();
       expect(msg.id, 'msg-1');
       expect(msg.text, 'hello');
       expect(msg.voiceId, 'v1');
       expect(msg.audioUrl, 'https://example.com/a.mp3');
       expect(msg.from.id, 'v1'); // voiceId 作为发送者标识
-      expect(msg.sentAt.isAfter(before), isTrue);
+      // sentAt 在 [before, after] 区间内（避免毫秒精度边界）
+      expect(msg.sentAt.isAfter(before.subtract(const Duration(milliseconds: 1))), isTrue);
+      expect(msg.sentAt.isBefore(after.add(const Duration(milliseconds: 1))), isTrue);
     });
 
     test('从 VtLite 数据构造时缺少 voiceId/audioUrl 不报错', () {
