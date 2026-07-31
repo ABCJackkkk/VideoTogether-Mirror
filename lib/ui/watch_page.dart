@@ -8,16 +8,23 @@ import 'package:videotogether/vt/vt_webview_bridge.dart';
 import 'package:videotogether/webview/app_webview_controller.dart';
 import 'package:videotogether/webview/vt_injector.dart';
 
-/// 观影页：组合 WebView + 顶栏 + 聊天浮层。
-///
-/// 顶栏 [RoomBar] 在 [RoomStore.room] 不为空时显示；
-/// 剩余空间用 [InAppWebView] 铺满，上面叠 [ChatOverlay]。
-/// WebView 加载完成后通过 [VTWebViewBridge.onPageLoaded] 注入 VtLite JS。
 class WatchPage extends StatefulWidget {
   final String videoUrl;
   final String nickname;
+  final bool isLocalVideo;
+  final bool create;
+  final String roomName;
+  final String password;
 
-  const WatchPage({super.key, required this.videoUrl, required this.nickname});
+  const WatchPage({
+    super.key,
+    required this.videoUrl,
+    required this.nickname,
+    required this.create,
+    required this.roomName,
+    this.isLocalVideo = false,
+    this.password = '',
+  });
 
   @override
   State<WatchPage> createState() => _WatchPageState();
@@ -27,6 +34,12 @@ class _WatchPageState extends State<WatchPage> {
   late final AppWebViewController _webviewCtrl;
   late final VTWebViewBridge _bridge;
   bool _loaded = false;
+  bool _loading = false;
+  int _progress = 0;
+  String _currentLoadedUrl = '';
+  String? _localVideoHtml;
+  String? _localVideoBaseUrl;
+  bool _roomInited = false;
 
   @override
   void initState() {
@@ -34,6 +47,64 @@ class _WatchPageState extends State<WatchPage> {
     _webviewCtrl = AppWebViewController();
     final injector = VTInjector(js: _JsAdapter(_webviewCtrl));
     _bridge = VTWebViewBridge(webview: _webviewCtrl, injector: injector);
+
+    if (widget.isLocalVideo && widget.videoUrl.isNotEmpty) {
+      final path = widget.videoUrl.replaceAll('\\', '/');
+      final lastSep = path.lastIndexOf('/');
+      final dir = path.substring(0, lastSep + 1);
+      final fileName = path.substring(lastSep + 1);
+      _localVideoBaseUrl = 'file:///$dir';
+      _localVideoHtml = '<!DOCTYPE html>'
+          '<html><head><meta charset="utf-8">'
+          '<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">'
+          '<style>html,body,body>*{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden}'
+          'video{object-fit:contain;width:100%;height:100%}</style></head>'
+          '<body><video id="video" src="$fileName" controls autoplay playsinline></video></body></html>';
+    }
+
+    // 加入方不填视频网址，加载空白 HTML 让 onLoadStop 触发
+    // 不用 about:blank，因为部分 WebView release 版 JS 桥接注入不完整
+    if (!widget.isLocalVideo && widget.videoUrl.isEmpty) {
+      _localVideoHtml = '<!DOCTYPE html>'
+          '<html><head><meta charset="utf-8">'
+          '<meta name="viewport" content="width=device-width,initial-scale=1">'
+          '<style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000}</style>'
+          '</head><body></body></html>';
+      _localVideoBaseUrl = 'about:blank';
+    }
+
+    _currentLoadedUrl = widget.videoUrl;
+
+    // 仅绑定 bridge，不立即调用 createRoom/joinRoom：
+    // 此时 WebView 尚未创建，VtLite JS 未注入，调用会静默失败。
+    // 房间操作统一在 onLoadStop 注入 VtLite JS 后执行。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final store = context.read<RoomStore>();
+      store.bindBridge(_bridge);
+    });
+  }
+
+  /// 在 VtLite JS 注入完成后调用 createRoom/joinRoom
+  /// （由 onLoadStop 触发，保证 window.VtLite 已存在）
+  Future<void> _initRoom() async {
+    if (_roomInited) return;
+    _roomInited = true;
+    final store = context.read<RoomStore>();
+    try {
+      if (widget.create) {
+        await store.createRoom(
+            name: widget.roomName, password: widget.password);
+      } else {
+        await store.joinRoom(
+            name: widget.roomName, password: widget.password);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('进入房间失败: $e')));
+      Navigator.of(context).pop();
+    }
   }
 
   @override
@@ -52,63 +123,222 @@ class _WatchPageState extends State<WatchPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFF7F5F2),
-      body: Column(
-        children: [
-          Consumer<RoomStore>(
-            builder: (ctx, store, _) {
-              if (store.room == null) {
-                return const SizedBox.shrink();
-              }
-              return RoomBar(
-                room: store.room!,
-                onLeave: () => _onLeave(store),
-              );
-            },
-          ),
-          Expanded(
-            child: Stack(
-              children: [
-                InAppWebView(
-                  initialUrlRequest:
-                      URLRequest(url: WebUri(widget.videoUrl)),
-                  onWebViewCreated: _webviewCtrl.attach,
-                  onLoadStop: (controller, url) async {
-                    if (_loaded) return;
-                    _loaded = true;
+      body: Consumer<RoomStore>(
+        builder: (ctx, store, _) {
+          // error 时 UI 仍然显示，顶栏/底部正常渲染，
+          // 由 _initRoom 的 catch 负责 snackbar + pop
+          final isConnecting = store.state == RoomStoreState.loading ||
+              store.state == RoomStoreState.idle;
+
+          return Column(
+            children: [
+              if (store.room != null) ...[
+                _AutoFollowHostUrl(
+                  store: store,
+                  currentLoadedUrl: _currentLoadedUrl,
+                  onFollow: (hostUrl) async {
+                    if (!mounted) return;
+                    _currentLoadedUrl = hostUrl;
+                    _loaded = false;
+                    // 跳转新 URL 后 JS 上下文重置，VtLite 需重新注入+重新 joinRoom
+                    _roomInited = false;
+                    _bridge.reset();
                     final messenger = ScaffoldMessenger.of(context);
                     try {
-                      await _bridge.onPageLoaded();
+                      await _webviewCtrl.loadUrl(hostUrl);
                     } catch (e) {
                       messenger.showSnackBar(
-                        SnackBar(content: Text('同步注入失败: $e')),
+                        SnackBar(content: Text('加载房主视频失败: $e')),
                       );
                     }
                   },
-                  shouldOverrideUrlLoading: (controller, action) async {
-                    final url = action.request.url.toString();
-                    if (!url.startsWith('http')) {
-                      return NavigationActionPolicy.CANCEL;
-                    }
-                    return NavigationActionPolicy.ALLOW;
-                  },
                 ),
-                Consumer<RoomStore>(
-                  builder: (ctx, store, _) => ChatOverlay(
-                    messages: store.messages,
-                    onSend: (text) => store.sendMessage(text),
-                  ),
+                RoomBar(
+                  room: store.room!,
+                  wsStatus: store.wsStatus,
+                  onLeave: () => _onLeave(store),
                 ),
-              ],
+              ] else
+                _buildConnectingBar(isConnecting),
+              Expanded(
+                child: Stack(
+                  children: [
+                    InAppWebView(
+                      initialUrlRequest:
+                          (widget.isLocalVideo || widget.videoUrl.isEmpty)
+                              ? null
+                              : URLRequest(url: WebUri(widget.videoUrl)),
+                      initialData: (_localVideoHtml != null)
+                          ? InAppWebViewInitialData(
+                              data: _localVideoHtml!,
+                              baseUrl: WebUri(_localVideoBaseUrl!),
+                            )
+                          : null,
+                      onWebViewCreated: _webviewCtrl.attach,
+                      onLoadStart: (controller, url) {
+                        if (url != null) _currentLoadedUrl = url.toString();
+                        setState(() {
+                          _loading = true;
+                          _progress = 0;
+                        });
+                      },
+                      onProgressChanged: (controller, progress) {
+                        setState(() {
+                          _progress = progress;
+                          if (progress >= 100) _loading = false;
+                        });
+                      },
+                      onLoadStop: (controller, url) async {
+                        if (url != null) _currentLoadedUrl = url.toString();
+                        setState(() => _loading = false);
+                        if (_loaded) return;
+                        _loaded = true;
+                        final messenger = ScaffoldMessenger.of(context);
+                        // 注入 VtLite JS（无 video 也注入，内部自动轮询）
+                        try {
+                          await _bridge.onPageLoaded();
+                        } catch (e) {
+                          messenger.showSnackBar(
+                            SnackBar(content: Text('同步注入失败: $e')),
+                          );
+                        }
+                        // 注入完成后发起 createRoom/joinRoom（统一入口，
+                        // 避免重复调用导致角色被重置、定时器混乱）
+                        await _initRoom();
+                      },
+                      onLoadError: (controller, url, code, message) async {
+                        // 加载失败时仍尝试注入 JS（initialData 空白页可注入）
+                        // 保证加入方/本地视频方房间流程能继续
+                        if (_loaded) return;
+                        _loaded = true;
+                        setState(() => _loading = false);
+                        try {
+                          await _bridge.onPageLoaded();
+                        } catch (_) {}
+                        await _initRoom();
+                      },
+                      shouldOverrideUrlLoading: (controller, action) async {
+                        final url = action.request.url.toString();
+                        if (url.startsWith('intent://') ||
+                            url.startsWith('market://') ||
+                            url.startsWith('tel:') ||
+                            url.startsWith('mailto:')) {
+                          return NavigationActionPolicy.CANCEL;
+                        }
+                        return NavigationActionPolicy.ALLOW;
+                      },
+                    ),
+                    if (_loading)
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        child: LinearProgressIndicator(
+                          value: _progress > 0 ? _progress / 100 : null,
+                          minHeight: 2,
+                          backgroundColor: Colors.transparent,
+                          valueColor: const AlwaysStoppedAnimation<Color>(
+                            Color(0xFF8B7355),
+                          ),
+                        ),
+                      ),
+                    if (_loading)
+                      const Center(
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Color(0xFF8B7355),
+                        ),
+                      ),
+                    Consumer<RoomStore>(
+                      builder: (ctx, store, _) => ChatOverlay(
+                        messages: store.messages,
+                        onSend: (text) => store.sendMessage(text),
+                      ),
+                    ),
+                    if (isConnecting && store.room == null)
+                      _buildConnectingOverlay(),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildConnectingBar(bool isConnecting) {
+    return Container(
+      height: 56,
+      color: const Color(0xFFF0ECE6),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      alignment: Alignment.centerLeft,
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 12,
+            height: 12,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: Color(0xFF8B7355),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Text(
+            isConnecting ? '连接中...' : '等待房主',
+            style: const TextStyle(
+              color: Color(0xFF6B6B6B),
+              fontSize: 14,
+              letterSpacing: 0.02,
+            ),
+          ),
+          const Spacer(),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text(
+              '取消',
+              style: TextStyle(
+                color: Color(0xFF6B6B6B),
+                fontSize: 14,
+              ),
             ),
           ),
         ],
       ),
     );
   }
+
+  Widget _buildConnectingOverlay() {
+    return Container(
+      color: const Color(0x99F7F5F2),
+      child: const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 32,
+              height: 32,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Color(0xFF8B7355),
+              ),
+            ),
+            SizedBox(height: 16),
+            Text(
+              '正在连接房间...',
+              style: TextStyle(
+                color: Color(0xFF6B6B6B),
+                fontSize: 14,
+                letterSpacing: 0.02,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
-/// 把 [AppWebViewController] 适配成 [JsEvaluator]，
-/// 让 [VTInjector] 通过业务层封装调用 WebView 的 evaluateJavascript。
 class _JsAdapter implements JsEvaluator {
   final AppWebViewController _ctrl;
   _JsAdapter(this._ctrl);
@@ -117,4 +347,50 @@ class _JsAdapter implements JsEvaluator {
   Future<dynamic> evaluate(String source) async {
     return _ctrl.evaluateJavascript(source);
   }
+}
+
+class _AutoFollowHostUrl extends StatefulWidget {
+  final RoomStore store;
+  final String currentLoadedUrl;
+  final Future<void> Function(String hostUrl) onFollow;
+
+  const _AutoFollowHostUrl({
+    required this.store,
+    required this.currentLoadedUrl,
+    required this.onFollow,
+  });
+
+  @override
+  State<_AutoFollowHostUrl> createState() => _AutoFollowHostUrlState();
+}
+
+class _AutoFollowHostUrlState extends State<_AutoFollowHostUrl> {
+  String? _lastFollowedUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkFollow());
+  }
+
+  @override
+  void didUpdateWidget(covariant _AutoFollowHostUrl oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.store.room?.url != widget.store.room?.url) {
+      _checkFollow();
+    }
+  }
+
+  void _checkFollow() {
+    final hostUrl = widget.store.room?.url;
+    if (hostUrl == null || hostUrl.isEmpty) return;
+    if (hostUrl.startsWith('file://')) return;
+    if (hostUrl == widget.currentLoadedUrl) return;
+    if (hostUrl == _lastFollowedUrl) return;
+    _lastFollowedUrl = hostUrl;
+    widget.onFollow(hostUrl);
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
 }

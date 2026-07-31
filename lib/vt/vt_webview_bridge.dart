@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:videotogether/vt/vt_bridge.dart';
 import 'package:videotogether/vt/vt_events.dart';
 import 'package:videotogether/vt/vt_models.dart';
@@ -13,11 +14,10 @@ import 'package:videotogether/webview/vt_injector.dart';
 /// - `window.VtLite.leaveRoom()`
 /// - `window.VtLite.sendText(msg)`
 /// - `window.VtLite.getState()` → `{role, roomName, wsOpen, memberCount}`
+/// - `window.VtLite.flushEvents()` → JSON 字符串，事件队列
 ///
-/// 事件转发：VtLite 通过
-/// `window.flutter_inappwebview.callHandler('vtEvent', {event, data})` 把事件
-/// 派发到 Dart 侧。本类在构造时注册 `vtEvent` handler，把 JSON 解析为
-/// [VTEvent] 后投递到 [events] 流。
+/// 事件转发：VtLite 把事件存入内部队列，Dart 侧通过定时轮询
+/// `flushEvents()` 拉取。不依赖 callHandler（在某些 WebView 页面中不可靠）。
 class VTWebViewBridge implements VTBridge {
   final AppWebViewController webview;
   final VTInjector injector;
@@ -25,32 +25,66 @@ class VTWebViewBridge implements VTBridge {
   final StreamController<VTEvent> _events =
       StreamController<VTEvent>.broadcast();
   bool _injected = false;
+  Timer? _pollTimer;
 
-  VTWebViewBridge({required this.webview, required this.injector}) {
-    webview.registerHandler('vtEvent', _handleVtEvent);
-  }
-
-  Future<dynamic> _handleVtEvent(List<dynamic> args) async {
-    if (args.isEmpty) return;
-    final raw = args.first;
-    if (raw is Map) {
-      try {
-        _events.add(VTEvent.fromJson(raw.cast<String, dynamic>()));
-      } catch (_) {
-        // 解析失败忽略，避免影响 JS 侧
-      }
-    }
-    return null;
-  }
+  VTWebViewBridge({required this.webview, required this.injector});
 
   @override
   Stream<VTEvent> get events => _events.stream;
 
-  /// 在网页加载完后调用：注入 VtLite JS（含轮询等 video 出现）
+  /// 在网页加载完后调用：直接注入 VtLite JS，并启动事件轮询。
+  /// 不等待 video 元素——VtLite JS 内部 startVideoPolling 会自动轮询绑定。
   Future<void> onPageLoaded() async {
     if (_injected) return;
-    await injector.waitForVideoAndInject();
+    await injector.injectOnly();
     _injected = true;
+    startPolling();
+  }
+
+  /// 重置注入状态（URL 变化后需重新注入）
+  void reset() {
+    _injected = false;
+    stopPolling();
+  }
+
+  /// 启动事件轮询：每 500ms 调用 flushEvents() 拉取 VtLite 事件
+  void startPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      _pollEvents();
+    });
+  }
+
+  void stopPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+  }
+
+  Future<void> _pollEvents() async {
+    try {
+      final result = await webview.evaluateJavascript(
+        'window.VtLite ? window.VtLite.flushEvents() : "[]"',
+      );
+      if (result == null) return;
+      String jsonStr;
+      if (result is String) {
+        jsonStr = result;
+      } else {
+        // 某些平台可能返回已解析的对象
+        jsonStr = jsonEncode(result);
+      }
+      if (jsonStr.isEmpty || jsonStr == '[]' || jsonStr == '"[]"') return;
+      final List<dynamic> events = jsonDecode(jsonStr);
+      for (final event in events) {
+        if (event is Map) {
+          try {
+            _events.add(VTEvent.fromJson(event.cast<String, dynamic>()));
+          } catch (_) {}
+        }
+      }
+    } catch (_) {
+      // 轮询失败静默忽略，下次重试
+    }
   }
 
   Future<dynamic> _eval(String js) async {
@@ -90,6 +124,7 @@ class VTWebViewBridge implements VTBridge {
 
   @override
   Future<void> leaveRoom() async {
+    stopPolling();
     await _eval('window.VtLite.leaveRoom()');
   }
 
@@ -115,6 +150,7 @@ class VTWebViewBridge implements VTBridge {
 
   @override
   void dispose() {
+    stopPolling();
     _events.close();
   }
 }

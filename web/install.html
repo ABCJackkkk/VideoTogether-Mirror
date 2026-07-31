@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>安装 VtLite 一起看</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #F7F5F2;
+      color: #2C2418;
+      min-height: 100vh;
+      padding: 24px 16px;
+      line-height: 1.6;
+    }
+    .container {
+      max-width: 480px;
+      margin: 0 auto;
+    }
+    .card {
+      background: #FFFFFF;
+      border: 1px solid #D4C8B8;
+      border-radius: 4px;
+      padding: 28px 24px;
+      margin-bottom: 16px;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      letter-spacing: 0.3px;
+    }
+    .subtitle {
+      font-size: 14px;
+      color: #8B7355;
+      margin-bottom: 24px;
+    }
+    .step {
+      margin-bottom: 20px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid #E8DFD0;
+    }
+    .step:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+      margin-bottom: 0;
+    }
+    .step-num {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      line-height: 24px;
+      text-align: center;
+      background: #8B7355;
+      color: #F7F5F2;
+      border-radius: 50%;
+      font-size: 12px;
+      font-weight: 600;
+      margin-right: 8px;
+    }
+    .step-title {
+      font-size: 15px;
+      font-weight: 600;
+      vertical-align: middle;
+      margin-bottom: 8px;
+      display: inline-block;
+    }
+    .step-desc {
+      font-size: 13px;
+      color: #5C4A3A;
+      margin-left: 32px;
+      margin-top: 6px;
+    }
+    .step-desc a {
+      color: #8B7355;
+      text-decoration: underline;
+    }
+    .btn {
+      display: inline-block;
+      padding: 12px 24px;
+      background: #2C2418;
+      color: #F7F5F2;
+      text-decoration: none;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      letter-spacing: 0.5px;
+      margin-top: 12px;
+      transition: background 0.2s;
+    }
+    .btn:hover {
+      background: #8B7355;
+    }
+    .btn-secondary {
+      background: #8B7355;
+    }
+    .btn-secondary:hover {
+      background: #2C2418;
+    }
+    .note {
+      background: #F7F5F2;
+      border-left: 3px solid #8B7355;
+      padding: 12px 16px;
+      margin-top: 16px;
+      font-size: 12px;
+      color: #5C4A3A;
+    }
+    .platform-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      background: #E8DFD0;
+      color: #8B7355;
+      border-radius: 3px;
+      font-size: 11px;
+      margin-left: 6px;
+    }
+    .footer {
+      text-align: center;
+      font-size: 11px;
+      color: #8B7355;
+      margin-top: 24px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>一起看视频 <span class="platform-badge">iPhone</span></h1>
+      <p class="subtitle">异地同步看视频，跟 Android 朋友一起看 B 站/YouTube</p>
+
+      <div class="step">
+        <span class="step-num">1</span>
+        <span class="step-title">安装 Via 浏览器</span>
+        <div class="step-desc">
+          App Store 搜索 "Via" 或直接访问：
+          <br>
+          <a href="https://apps.apple.com/cn/app/via/id1234567890" target="_blank">App Store - Via</a>
+        </div>
+      </div>
+
+      <div class="step">
+        <span class="step-num">2</span>
+        <span class="step-title">安装同步脚本</span>
+        <div class="step-desc">
+          点击下面按钮，Via 会自动弹出安装提示，点"确认"即可。
+          <br>
+          <a href="vt-lite.user.js" class="btn">安装同步脚本</a>
+        </div>
+      </div>
+
+      <div class="step">
+        <span class="step-num">3</span>
+        <span class="step-title">开始使用</span>
+        <div class="step-desc">
+          用 Via 打开任意视频页面（B 站、YouTube 等），右下角会自动出现"一起看"控制面板。
+          <br>输入房间号加入，跟朋友同步看视频。
+        </div>
+      </div>
+
+      <div class="note">
+        <strong>提示：</strong>每次看视频时，请<strong>用 Via 浏览器</strong>打开视频页面（不要用 Safari）。
+        脚本只在 Via 里自动运行。
+      </div>
+    </div>
+
+    <div class="card">
+      <h1>常见问题</h1>
+      <div class="step">
+        <span class="step-title">为什么必须用 Via？</span>
+        <div class="step-desc">
+          iPhone 上 Safari、Edge、Chrome 都不支持装脚本。Via 是少数支持用户脚本的 iPhone 浏览器，
+          能让脚本在所有视频页面自动运行。
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-title">脚本能控制哪些视频？</span>
+        <div class="step-desc">
+          B 站、YouTube、优酷、本地文件等大部分视频都能控制。
+          腾讯视频、爱奇艺等带 DRM 加密的可能无法同步。
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-title">脚本安全吗？</span>
+        <div class="step-desc">
+          脚本是开源的，只做两件事：1) 同步播放进度 2) 收发文字消息。
+          不收集任何数据，不上传任何信息。
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      VtLite 一起看 · 基于 VideoTogether 协议 · MIT License
+    </div>
+  </div>
+</body>
+</html>

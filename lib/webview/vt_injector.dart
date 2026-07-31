@@ -41,12 +41,17 @@ class VTInjector {
     for (var i = 0; i < maxAttempts; i++) {
       final has = await js.evaluate('!!document.querySelector("video")');
       if (has == true) {
-        final vtJs = await assets.loadString(_assetPath);
-        await js.evaluate(vtJs);
+        await injectOnly();
         return;
       }
       await Future.delayed(pollInterval);
     }
     throw VideoNotFoundException();
+  }
+
+  /// 直接注入 VtLite JS，不等待 video 元素
+  Future<void> injectOnly() async {
+    final vtJs = await assets.loadString(_assetPath);
+    await js.evaluate(vtJs);
   }
 }

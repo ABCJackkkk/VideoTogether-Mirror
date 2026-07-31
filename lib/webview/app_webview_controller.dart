@@ -7,6 +7,9 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 class AppWebViewController {
   InAppWebViewController? _raw;
 
+  /// handler 在 WebView 创建前可能就被注册，先缓存，attach 时统一注册
+  final Map<String, Future<dynamic> Function(List<dynamic> args)> _pendingHandlers = {};
+
   /// 由 InAppWebView widget 的 onCreate 回调注入
   void attach(InAppWebViewController controller) {
     _raw = controller;
@@ -17,8 +20,15 @@ class AppWebViewController {
             '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         useShouldOverrideUrlLoading: true,
         mediaPlaybackRequiresUserGesture: false,
+        allowFileAccessFromFileURLs: true,
+        allowUniversalAccessFromFileURLs: true,
       ),
     );
+    // 注册缓存的 handler
+    _pendingHandlers.forEach((name, handler) {
+      controller.addJavaScriptHandler(handlerName: name, callback: handler);
+    });
+    _pendingHandlers.clear();
   }
 
   void detach() => _raw = null;
@@ -41,7 +51,11 @@ class AppWebViewController {
     String name,
     Future<dynamic> Function(List<dynamic> args) handler,
   ) {
-    _raw?.addJavaScriptHandler(handlerName: name, callback: handler);
+    if (_raw != null) {
+      _raw!.addJavaScriptHandler(handlerName: name, callback: handler);
+    } else {
+      _pendingHandlers[name] = handler;
+    }
   }
 
   /// 拦截 App 唤起 scheme，只放行 http/https

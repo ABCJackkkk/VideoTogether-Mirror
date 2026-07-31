@@ -52,15 +52,27 @@
   var role = ROLE.NULL;
   var memberCount = 0;
   var masterTimer = null;       // 房主上报循环 setInterval 句柄
+  var memberTimer = null;       // 成员心跳循环 setInterval 句柄
+  var videoPollTimer = null;    // video 元素轮询定时器
   var videoElement = null;      // 当前绑定的 video 元素
   var intentionalClose = false; // 主动关闭标志（leaveRoom/destroy 时置 true）
   var destroyed = false;
+
+  // ===== 自动重连状态 =====
+  // 连接断开（非主动）后，按指数退避重试：1s, 2s, 4s, 8s, 16s, 30s（封顶）
+  var reconnectTimer = null;
+  var reconnectAttempts = 0;
+  var RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000];
 
   // 临时用户 id（服务端用于识别房主身份）
   var tempUser = "vt_" + Date.now() + "_" + uuid();
 
   // 事件监听器表：{ event: [cb, cb, ...] }
   var listeners = {};
+
+  // 事件队列：供 Dart 侧 flushEvents() 轮询拉取
+  // 不依赖 callHandler（在 initialData/某些页面中可能不可用）
+  var eventQueue = [];
 
   // ===== 工具函数 =====
 
@@ -91,7 +103,7 @@
     });
   }
 
-  // 触发事件：先调本地监听器，再转发给 Dart 侧
+  // 触发事件：先调本地监听器，再存入队列供 Dart 侧轮询
   function emit(event, data) {
     var cbs = listeners[event];
     if (cbs) {
@@ -100,16 +112,16 @@
         try { cb(data); } catch (e) {}
       });
     }
-    // 转发给 Flutter（flutter_inappwebview 桥接）
-    if (typeof window !== "undefined" &&
-        window.flutter_inappwebview &&
-        window.flutter_inappwebview.callHandler) {
-      try {
-        window.flutter_inappwebview.callHandler("vtEvent", {
-          event: event, data: data
-        });
-      } catch (e) {}
-    }
+    // 存入队列，供 Dart 侧 flushEvents() 拉取
+    eventQueue.push({ event: event, data: data });
+  }
+
+  // Dart 侧轮询调用：返回并清空事件队列
+  function flushEvents() {
+    if (eventQueue.length === 0) return "[]";
+    var json = JSON.stringify(eventQueue);
+    eventQueue = [];
+    return json;
   }
 
   // 发送一条 WS 消息（仅在 WS OPEN 时发送）
@@ -149,11 +161,65 @@
       }
       if (!msg || !msg.method) continue;
       var data = msg.data || {};
+      // 错误响应：VT 服务器返回 { method: "...", data: { errorMessage: "..." } }
+      if (data.errorMessage != null) {
+        var errMsg = String(data.errorMessage);
+        if (errMsg.indexOf("password") >= 0 || errMsg.indexOf("密码") >= 0) {
+          emit("error", { message: "password_error", error: errMsg });
+        } else if (errMsg.indexOf("not found") >= 0 ||
+                   errMsg.indexOf("不存在") >= 0 ||
+                   errMsg.indexOf("room not exist") >= 0) {
+          emit("error", { message: "room_not_found", error: errMsg });
+        } else {
+          emit("error", { message: "server_error", error: errMsg });
+        }
+        continue;
+      }
+      if (data.error || data.code === "error" || msg.method === "error") {
+        var errMsg = String(data.error || data.message || "unknown_error");
+        // 识别常见错误码
+        if (errMsg.indexOf("password") >= 0 || errMsg.indexOf("密码") >= 0) {
+          emit("error", { message: "password_error", error: errMsg });
+        } else if (errMsg.indexOf("not found") >= 0 ||
+                   errMsg.indexOf("不存在") >= 0 ||
+                   errMsg.indexOf("room not exist") >= 0) {
+          emit("error", { message: "room_not_found", error: errMsg });
+        } else {
+          emit("error", { message: "server_error", error: errMsg });
+        }
+        continue;
+      }
       if (msg.method === "/room/update" ||
           msg.method === "/room/update_member" ||
           msg.method === "/room/join") {
         if (typeof data.memberCount === "number") memberCount = data.memberCount;
         emit("room_update", data);
+        // 房主收到成员心跳时，立即触发一次上报，让成员尽快拿到最新状态
+        if (role === ROLE.MASTER && msg.method === "/room/update_member") {
+          if (videoElement) {
+            var v = videoElement;
+            try {
+              send({
+                method: "/room/update",
+                data: {
+                  tempUser: tempUser,
+                  password: password,
+                  name: roomName,
+                  playbackRate: v.playbackRate || 1,
+                  currentTime: v.currentTime || 0,
+                  paused: !!v.paused,
+                  url: (typeof location !== "undefined" && location.href) || "",
+                  lastUpdateClientTime: Date.now() / 1000 + timeOffset,
+                  duration: v.duration || 0,
+                  protected: !!password,
+                  videoTitle: (typeof document !== "undefined" && document.title) || "",
+                  sendLocalTimestamp: Date.now() / 1000,
+                  m3u8Url: ""
+                }
+              });
+            } catch (e) {}
+          }
+        }
       } else if (msg.method === "send_txtmsg") {
         emit("text_message", data);
       }
@@ -161,27 +227,38 @@
     }
   }
 
-  // ===== WebSocket 连接（主地址失败自动回退） =====
+  // ===== WebSocket 连接（主地址失败自动回退，断开后自动重连） =====
   function connectWs(urlIndex) {
     if (destroyed) return;
     if (typeof urlIndex !== "number") urlIndex = 0;
     if (urlIndex >= WS_URLS.length) {
       emit("error", { message: "ws_all_urls_failed" });
+      // 所有 URL 都失败：进入重连流程
+      scheduleReconnect();
       return;
     }
     try {
       ws = new WebSocket(WS_URLS[urlIndex]);
     } catch (e) {
       emit("error", { message: "ws_construct_failed", error: String(e) });
+      scheduleReconnect();
       return;
     }
 
     ws.onopen = function () {
       wsReady = true;
+      reconnectAttempts = 0; // 连接成功，重置重连计数
       emit("ws_open", {});
       // 重连场景：若已是成员，重新发 join 让服务端推送房间状态
       if (role === ROLE.MEMBER && roomName) {
         send({ method: "/room/join", data: { name: roomName, password: password } });
+        if (!memberTimer) startMemberTimer();
+      }
+      // 房主：WS 连通后立即发一次 update 初始化房间（对照 VT 原版 vt.js:3566），
+      // 避免成员 joinRoom 时收到 room_not_found；同时启动 2s 上报循环
+      if (role === ROLE.MASTER && roomName) {
+        sendUpdateOnce();
+        if (!masterTimer) startMasterTimer();
       }
     };
 
@@ -203,50 +280,82 @@
       intentionalClose = false;
       ws = null;
       wsReady = false;
-      // 主动关闭（leaveRoom/destroy）：不 emit，不回退
+      // 主动关闭（leaveRoom/destroy）：不 emit，不重连
       if (wasIntentional) return;
-      // 连接阶段失败且有回退 URL：尝试下一个
+      // 连接阶段失败且有回退 URL：立即尝试下一个
       if (!wasReady && urlIndex + 1 < WS_URLS.length) {
         connectWs(urlIndex + 1);
         return;
       }
       emit("ws_close", { wasOpen: wasReady });
+      // 非主动断开：进入自动重连流程
+      scheduleReconnect();
     };
   }
 
+  // ===== 自动重连调度 =====
+  function scheduleReconnect() {
+    if (destroyed) return;
+    if (role === ROLE.NULL) return; // 已离开房间，不重连
+    if (reconnectTimer) return;     // 已有重连任务在等待
+    var delay = RECONNECT_DELAYS[
+      Math.min(reconnectAttempts, RECONNECT_DELAYS.length - 1)
+    ];
+    reconnectAttempts++;
+    emit("reconnecting", { attempt: reconnectAttempts, delayMs: delay });
+    reconnectTimer = setTimeout(function () {
+      reconnectTimer = null;
+      if (destroyed || role === ROLE.NULL) return;
+      connectWs(0);
+    }, delay);
+  }
+
+  function clearReconnectTimer() {
+    if (reconnectTimer) {
+      try { clearTimeout(reconnectTimer); } catch (e) {}
+      reconnectTimer = null;
+    }
+  }
+
   // ===== 房主上报循环（每 2 秒） =====
+  // 构造一次 /room/update 上报负载。video 缺失时用默认值。
+  function buildUpdatePayload() {
+    var currentTime = 0, paused = true, playbackRate = 1, duration = 0;
+    if (videoElement) {
+      try {
+        currentTime = videoElement.currentTime || 0;
+        paused = !!videoElement.paused;
+        playbackRate = videoElement.playbackRate || 1;
+        duration = videoElement.duration || 0;
+      } catch (e) {}
+    }
+    return {
+      tempUser: tempUser,
+      password: password,
+      name: roomName,
+      playbackRate: playbackRate,
+      currentTime: currentTime,
+      paused: paused,
+      url: (typeof location !== "undefined" && location.href) || "",
+      lastUpdateClientTime: Date.now() / 1000 + timeOffset,
+      duration: duration,
+      protected: !!password,
+      videoTitle: (typeof document !== "undefined" && document.title) || "",
+      sendLocalTimestamp: Date.now() / 1000,
+      m3u8Url: ""
+    };
+  }
+
+  // 立即发送一次 /room/update（房主初始化房间用，对照 VT 原版 vt.js:3566）
+  function sendUpdateOnce() {
+    send({ method: "/room/update", data: buildUpdatePayload() });
+  }
+
   function startMasterTimer() {
     stopMasterTimer();
     masterTimer = setInterval(function () {
-      if (role !== ROLE.MASTER || !videoElement) return;
-      var v = videoElement;
-      var currentTime = 0, paused = true, playbackRate = 1, duration = 0;
-      try {
-        currentTime = v.currentTime || 0;
-        paused = !!v.paused;
-        playbackRate = v.playbackRate || 1;
-        duration = v.duration || 0;
-      } catch (e) {
-        return;
-      }
-      send({
-        method: "/room/update",
-        data: {
-          tempUser: tempUser,
-          password: password,
-          name: roomName,
-          playbackRate: playbackRate,
-          currentTime: currentTime,
-          paused: paused,
-          url: (typeof location !== "undefined" && location.href) || "",
-          lastUpdateClientTime: Date.now() / 1000 + timeOffset,
-          duration: duration,
-          protected: !!password, // 设了密码则房间受保护
-          videoTitle: (typeof document !== "undefined" && document.title) || "",
-          sendLocalTimestamp: Date.now() / 1000,
-          m3u8Url: ""
-        }
-      });
+      if (role !== ROLE.MASTER) return;
+      sendUpdateOnce();
     }, 2000);
   }
 
@@ -257,15 +366,81 @@
     }
   }
 
+  // ===== 成员心跳循环（每 2 秒发送 /room/update_member） =====
+  // 原版 VideoTogether 协议要求成员定期发送 update_member，
+  // 否则服务器不认为成员在线，memberCount 不会更新。
+  function startMemberTimer() {
+    stopMemberTimer();
+    memberTimer = setInterval(function () {
+      if (role !== ROLE.MEMBER || !roomName) return;
+      send({
+        method: "/room/update_member",
+        data: {
+          password: password,
+          roomName: roomName,
+          sendLocalTimestamp: Date.now() / 1000,
+          userId: tempUser,
+          isLoadding: false,
+          currentUrl: (typeof location !== "undefined" && location.href) || ""
+        }
+      });
+    }, 2000);
+  }
+
+  function stopMemberTimer() {
+    if (memberTimer) {
+      try { clearInterval(memberTimer); } catch (e) {}
+      memberTimer = null;
+    }
+  }
+
+  // ===== video 元素轮询 =====
+  // 当 createRoom/joinRoom 时 video 尚未出现，启动轮询自动绑定
+  function startVideoPolling() {
+    stopVideoPolling();
+    videoPollTimer = setInterval(function () {
+      if (videoElement) {
+        stopVideoPolling();
+        return;
+      }
+      var el = document.querySelector("video");
+      if (el) {
+        videoElement = el;
+        stopVideoPolling();
+      }
+    }, 500);
+  }
+
+  function stopVideoPolling() {
+    if (videoPollTimer) {
+      try { clearInterval(videoPollTimer); } catch (e) {}
+      videoPollTimer = null;
+    }
+  }
+
+  // 手动设置 video 元素（供 Dart 侧调用）
+  function setVideo(videoEl) {
+    videoElement = videoEl || null;
+    if (videoElement) stopVideoPolling();
+  }
+
   // ===== 成员同步逻辑（只注册一次，靠 role 守卫） =====
   // 收到 room_update 时：外推真实进度，差 > 1s 则 seek；同步 paused/playbackRate
   on("room_update", function (room) {
     if (role !== ROLE.MEMBER || !videoElement || !room) return;
     var v = videoElement;
     try {
-      var realCurrent = room.currentTime +
-        (Date.now() / 1000 + timeOffset -
-          (room.lastUpdateServerTime || 0)) * (room.playbackRate || 1);
+      // 外推真实进度：realCurrent = currentTime + (now - lastUpdateServerTime) * rate
+      // lastUpdateServerTime 缺失或异常（<=0）时不外推，直接用 currentTime
+      var realCurrent = room.currentTime;
+      var lastServer = room.lastUpdateServerTime;
+      if (typeof lastServer === "number" && lastServer > 0) {
+        var elapsed = Date.now() / 1000 + timeOffset - lastServer;
+        // 仅在合理范围内外推（0~3600s），避免时间戳异常导致跳到几十亿秒
+        if (elapsed >= 0 && elapsed < 3600) {
+          realCurrent = room.currentTime + elapsed * (room.playbackRate || 1);
+        }
+      }
       if (typeof v.currentTime === "number" &&
           Math.abs(v.currentTime - realCurrent) > 1) {
         v.currentTime = realCurrent;
@@ -291,6 +466,7 @@
   async function createRoom(name, pwd, videoEl) {
     if (!name) throw new Error("room name required");
     stopMasterTimer();
+    stopMemberTimer();
     roomName = String(name);
     password = String(pwd || "");
     role = ROLE.MASTER;
@@ -299,11 +475,13 @@
     await syncTime();
     if (!ws) connectWs(0);
     startMasterTimer();
+    if (!videoElement) startVideoPolling();
   }
 
   async function joinRoom(name, pwd, videoEl) {
     if (!name) throw new Error("room name required");
     stopMasterTimer();
+    stopMemberTimer();
     roomName = String(name);
     password = String(pwd || "");
     role = ROLE.MEMBER;
@@ -313,11 +491,17 @@
     if (!ws) connectWs(0);
     // 若 WS 已 open 立即发 join；否则 onopen 会补发
     send({ method: "/room/join", data: { name: roomName, password: password } });
+    startMemberTimer();
+    if (!videoElement) startVideoPolling();
   }
 
   function leaveRoom() {
     intentionalClose = true;
+    clearReconnectTimer();
+    reconnectAttempts = 0;
     stopMasterTimer();
+    stopMemberTimer();
+    stopVideoPolling();
     if (ws) { try { ws.close(); } catch (e) {} }
     ws = null;
     wsReady = false;
@@ -350,7 +534,11 @@
   function destroy() {
     destroyed = true;
     intentionalClose = true;
+    clearReconnectTimer();
+    reconnectAttempts = 0;
     stopMasterTimer();
+    stopMemberTimer();
+    stopVideoPolling();
     if (ws) { try { ws.close(); } catch (e) {} }
     ws = null;
     wsReady = false;
@@ -371,6 +559,8 @@
       leaveRoom: leaveRoom,
       sendText: sendText,
       getState: getState,
+      setVideo: setVideo,
+      flushEvents: flushEvents,
       destroy: destroy
     };
   }

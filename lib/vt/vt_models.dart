@@ -49,6 +49,9 @@ class Room {
   /// 协议下发的成员数；若为 null 则由 [members] 推导
   final int? _memberCount;
 
+  /// 房主上报的视频页面 URL（用于让加入方自动跳转）
+  final String url;
+
   const Room({
     required this.id,
     required this.name,
@@ -59,7 +62,11 @@ class Room {
     this.playbackRate = 1.0,
     this.lastUpdateServerTime = 0,
     int? memberCount,
+    this.url = '',
   }) : _memberCount = memberCount;
+
+  /// 协议下发的原始成员数（null 表示服务端未下发，需保留旧值）
+  int? get memberCountValue => _memberCount;
 
   int get memberCount => _memberCount ?? members.length;
 
@@ -77,6 +84,7 @@ class Room {
       lastUpdateServerTime:
           (data['lastUpdateServerTime'] as num?)?.toDouble() ?? 0,
       memberCount: (data['memberCount'] as num?)?.toInt(),
+      url: (data['url'] as String?) ?? '',
     );
   }
 
@@ -90,6 +98,7 @@ class Room {
     double? playbackRate,
     double? lastUpdateServerTime,
     int? memberCount,
+    String? url,
   }) {
     return Room(
       id: id ?? this.id,
@@ -102,12 +111,13 @@ class Room {
       lastUpdateServerTime:
           lastUpdateServerTime ?? this.lastUpdateServerTime,
       memberCount: memberCount ?? _memberCount,
+      url: url ?? this.url,
     );
   }
 
   @override
   String toString() =>
-      'Room(id=$id, name=$name, memberCount=$memberCount, currentTime=$currentTime, paused=$paused)';
+      'Room(id=$id, name=$name, memberCount=$memberCount, url=$url, currentTime=$currentTime, paused=$paused)';
 }
 
 /// 聊天消息
@@ -135,13 +145,18 @@ class ChatMessage {
   /// 从 VtLite text_message 事件的 data 构造 ChatMessage
   ///
   /// VtLite 协议字段：{msg, id, voiceId, audioUrl?}，不含发送者昵称与时间戳。
-  /// 这里用 voiceId 作为发送者 id 与 name，sentAt 取本地当前时间。
+  /// voiceId 为空时（VT 原版不发昵称）用"成员"兜底，避免显示空发送者。
   factory ChatMessage.fromVtLite(Map<String, dynamic> data) {
     final voiceId = data['voiceId'] as String?;
-    final fromId = voiceId ?? (data['id'] as String?) ?? '';
+    final fromId = (voiceId != null && voiceId.isNotEmpty)
+        ? voiceId
+        : (data['id'] as String?) ?? '';
+    final fromName = (voiceId != null && voiceId.isNotEmpty)
+        ? voiceId
+        : '成员';
     return ChatMessage(
       id: (data['id'] as String?) ?? '',
-      from: Member(id: fromId, name: fromId),
+      from: Member(id: fromId, name: fromName),
       text: (data['msg'] as String?) ?? '',
       sentAt: DateTime.now(),
       voiceId: voiceId,

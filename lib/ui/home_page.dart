@@ -1,6 +1,7 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
-/// 首页：粘贴视频网址 + 输入昵称 + 选择创建或加入房间。
+/// 首页：粘贴视频网址或选择本地文件 + 输入昵称 + 房间名/密码 + 选择创建或加入房间。
 ///
 /// 视觉遵循 Aui（Ins 风简约、暖沙色调）规范：
 /// - 主背景 #F7F5F2、顶栏暖背景 #F0ECE6
@@ -10,16 +11,19 @@ import 'package:flutter/material.dart';
 class HomePage extends StatefulWidget {
   /// 点击创建/加入房间时触发。
   ///
-  /// - [url]：视频网页地址
+  /// - [url]：视频网页地址，或本地视频文件的路径（当 [isLocalVideo] 为 true）
   /// - [create]：true=创建房间，false=加入房间
-  /// - [roomId]：加入时由用户填入的房间名（VtLite 协议下房间名即唯一标识）；
-  ///   创建时为 null
+  /// - [roomName]：房间名，创建时自拟，加入时填对方告知的房间名
+  /// - [password]：房间密码，可选；创建时设密，加入时需匹配
   /// - [nickname]：本端昵称
+  /// - [isLocalVideo]：是否为本地视频文件
   final Future<void> Function({
     required String url,
     required bool create,
-    String? roomId,
+    required String roomName,
     required String nickname,
+    String password,
+    bool isLocalVideo,
   }) onStart;
 
   const HomePage({super.key, required this.onStart});
@@ -31,10 +35,14 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage>
     with SingleTickerProviderStateMixin {
   final _urlCtrl = TextEditingController();
-  final _roomCtrl = TextEditingController();
+  final _roomNameCtrl = TextEditingController();
+  final _passwordCtrl = TextEditingController();
   final _nameCtrl = TextEditingController(text: '匿名');
   bool _joining = false;
   bool _busy = false;
+  bool _isLocalVideo = false;
+  String? _localFilePath;
+  String? _localFileName;
 
   // Aui 色板
   static const Color _kBgWarm = Color(0xFFF0ECE6);
@@ -47,7 +55,7 @@ class _HomePageState extends State<HomePage>
   // 交错淡入动画：每个块延迟 0.3s 出现，单块时长 1.2s
   late final AnimationController _fadeCtrl;
   final List<Animation<double>> _fadeAnims = [];
-  static const int _animBlockCount = 5;
+  static const int _animBlockCount = 7; // URL/本地文件 + 昵称 + 房间名 + 密码 + 本地视频切换 + 加入房间 + 按钮
   static const Duration _blockDuration = Duration(milliseconds: 1200);
   static const Duration _stagger = Duration(milliseconds: 300);
   static final Duration _totalDuration =
@@ -80,18 +88,36 @@ class _HomePageState extends State<HomePage>
   @override
   void dispose() {
     _urlCtrl.dispose();
-    _roomCtrl.dispose();
+    _roomNameCtrl.dispose();
+    _passwordCtrl.dispose();
     _nameCtrl.dispose();
     _fadeCtrl.dispose();
     super.dispose();
   }
 
+  Future<void> _pickLocalVideo() async {
+    final result = await FilePicker.pickFiles(
+      type: FileType.video,
+      allowMultiple: false,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.first;
+    if (file.path == null) return;
+    setState(() {
+      _localFilePath = file.path;
+      _localFileName = file.name;
+    });
+  }
+
   Future<void> _start({required bool create}) async {
-    final url = _urlCtrl.text.trim();
+    final url = _isLocalVideo ? (_localFilePath ?? '') : _urlCtrl.text.trim();
     final name = _nameCtrl.text.trim();
-    if (url.isEmpty) {
+    final roomName = _roomNameCtrl.text.trim();
+    final password = _passwordCtrl.text.trim();
+    // 房主必填视频网址或本地文件；加入方可不填（会自动跟随房主的视频 URL）
+    if (create && url.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请粘贴视频网址')),
+        SnackBar(content: Text(_isLocalVideo ? '请选择本地视频文件' : '请粘贴视频网址')),
       );
       return;
     }
@@ -101,9 +127,9 @@ class _HomePageState extends State<HomePage>
       );
       return;
     }
-    if (!create && _roomCtrl.text.trim().isEmpty) {
+    if (roomName.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请输入房间号')),
+        const SnackBar(content: Text('请输入房间名')),
       );
       return;
     }
@@ -111,9 +137,10 @@ class _HomePageState extends State<HomePage>
     await widget.onStart(
       url: url,
       create: create,
-      roomId:
-          _roomCtrl.text.trim().isEmpty ? null : _roomCtrl.text.trim(),
+      roomName: roomName,
       nickname: name,
+      password: password,
+      isLocalVideo: _isLocalVideo,
     );
     if (mounted) setState(() => _busy = false);
   }
@@ -190,24 +217,42 @@ class _HomePageState extends State<HomePage>
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,
               children: [
-                _fadeBlock(
-                  index: 0,
-                  child: TextField(
-                    controller: _urlCtrl,
-                    decoration: _fieldDecoration(
-                      labelText: '视频网址',
-                      hintText: '粘贴 B站 / YouTube 等视频网页地址',
-                    ),
-                    style: const TextStyle(
-                      color: _kTextPrimary,
-                      letterSpacing: 0.02,
-                      height: 1.8,
-                    ),
-                    keyboardType: TextInputType.url,
-                    autocorrect: false,
-                  ),
+                // 视频网址：加入方隐藏（房主上报后自动跳转）；本地视频模式替换为文件选择
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 240),
+                  curve: Curves.easeInOutCubic,
+                  child: _joining
+                      ? const SizedBox.shrink()
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _isLocalVideo
+                                ? _fadeBlock(
+                                    index: 0,
+                                    child: _localVideoPicker(),
+                                  )
+                                : _fadeBlock(
+                                    index: 0,
+                                    child: TextField(
+                                      controller: _urlCtrl,
+                                      decoration: _fieldDecoration(
+                                        labelText: '视频网址',
+                                        hintText:
+                                            '粘贴 B站 / YouTube 等视频网页地址',
+                                      ),
+                                      style: const TextStyle(
+                                        color: _kTextPrimary,
+                                        letterSpacing: 0.02,
+                                        height: 1.8,
+                                      ),
+                                      keyboardType: TextInputType.url,
+                                      autocorrect: false,
+                                    ),
+                                  ),
+                            const SizedBox(height: 16),
+                          ],
+                        ),
                 ),
-                const SizedBox(height: 16),
                 _fadeBlock(
                   index: 1,
                   child: TextField(
@@ -220,9 +265,85 @@ class _HomePageState extends State<HomePage>
                     ),
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 16),
                 _fadeBlock(
                   index: 2,
+                  child: TextField(
+                    controller: _roomNameCtrl,
+                    decoration: _fieldDecoration(
+                      labelText: '房间名',
+                      hintText: _joining ? '对方告知的房间名' : '自拟一个房间名',
+                    ),
+                    style: const TextStyle(
+                      color: _kTextPrimary,
+                      letterSpacing: 0.02,
+                      height: 1.8,
+                    ),
+                    autocorrect: false,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _fadeBlock(
+                  index: 3,
+                  child: TextField(
+                    controller: _passwordCtrl,
+                    decoration: _fieldDecoration(
+                      labelText: '房间密码',
+                      hintText: '可选，留空表示无密码',
+                    ),
+                    style: const TextStyle(
+                      color: _kTextPrimary,
+                      letterSpacing: 0.02,
+                      height: 1.8,
+                    ),
+                    obscureText: true,
+                    autocorrect: false,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                // 本地视频开关（创建房间时可用）
+                _fadeBlock(
+                  index: 4,
+                  child: Theme(
+                    data: Theme.of(context).copyWith(
+                      checkboxTheme: CheckboxThemeData(
+                        fillColor: WidgetStateProperty.resolveWith((states) {
+                          if (states.contains(WidgetState.selected)) {
+                            return _kAccent;
+                          }
+                          return null;
+                        }),
+                      ),
+                    ),
+                    child: CheckboxListTile(
+                      value: _isLocalVideo,
+                      contentPadding:
+                          const EdgeInsets.symmetric(horizontal: 4),
+                      dense: true,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      title: const Text(
+                        '播放本地视频文件',
+                        style: TextStyle(
+                          color: _kTextSecondary,
+                          fontSize: 14,
+                          letterSpacing: 0.02,
+                        ),
+                      ),
+                      onChanged: _joining
+                          ? null
+                          : (v) => setState(() {
+                                _isLocalVideo =
+                                    v ?? false;
+                                if (!_isLocalVideo) {
+                                  _localFilePath = null;
+                                  _localFileName = null;
+                                }
+                              }),
+                    ),
+                  ),
+                ),
+                _fadeBlock(
+                  index: 5,
                   child: Theme(
                     data: Theme.of(context).copyWith(
                       checkboxTheme: CheckboxThemeData(
@@ -253,34 +374,9 @@ class _HomePageState extends State<HomePage>
                     ),
                   ),
                 ),
-                AnimatedSize(
-                  duration: const Duration(milliseconds: 240),
-                  curve: Curves.easeInOutCubic,
-                  child: _joining
-                      ? Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: _fadeBlock(
-                            index: 3,
-                            child: TextField(
-                              controller: _roomCtrl,
-                              decoration: _fieldDecoration(
-                                labelText: '房间号',
-                                hintText: '对方告知的房间号',
-                              ),
-                              style: const TextStyle(
-                                color: _kTextPrimary,
-                                letterSpacing: 0.02,
-                                height: 1.8,
-                              ),
-                              autocorrect: false,
-                            ),
-                          ),
-                        )
-                      : const SizedBox.shrink(),
-                ),
                 const SizedBox(height: 32),
                 _fadeBlock(
-                  index: 4,
+                  index: 6,
                   child: FilledButton(
                     style: FilledButton.styleFrom(
                       backgroundColor: _kTextPrimary,
@@ -310,6 +406,66 @@ class _HomePageState extends State<HomePage>
           ),
         ),
       ),
+    );
+  }
+
+  /// 本地视频选择按钮 + 已选文件名
+  Widget _localVideoPicker() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        OutlinedButton.icon(
+          onPressed: _pickLocalVideo,
+          icon: const Icon(Icons.video_library,
+              color: _kAccent, size: 20),
+          label: const Text(
+            '选择视频文件',
+            style: TextStyle(
+              color: _kAccent,
+              letterSpacing: 0.02,
+              fontSize: 14,
+            ),
+          ),
+          style: OutlinedButton.styleFrom(
+            side: const BorderSide(color: _kAccent),
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape: const RoundedRectangleBorder(
+              borderRadius: BorderRadius.all(Radius.circular(4)),
+            ),
+          ),
+        ),
+        if (_localFileName != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Row(
+              children: [
+                const Icon(Icons.movie, color: _kAccent, size: 16),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    _localFileName!,
+                    style: const TextStyle(
+                      color: _kTextSecondary,
+                      fontSize: 13,
+                      letterSpacing: 0.02,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: () => setState(() {
+                    _localFilePath = null;
+                    _localFileName = null;
+                  }),
+                  child: const Icon(Icons.close,
+                      color: _kTextSecondary, size: 16),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }

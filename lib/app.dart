@@ -3,10 +3,6 @@ import 'package:provider/provider.dart';
 import 'package:videotogether/state/room_store.dart';
 import 'package:videotogether/ui/home_page.dart';
 import 'package:videotogether/ui/watch_page.dart';
-import 'package:videotogether/vt/vt_bridge.dart';
-import 'package:videotogether/vt/vt_webview_bridge.dart';
-import 'package:videotogether/webview/app_webview_controller.dart';
-import 'package:videotogether/webview/vt_injector.dart';
 
 /// App 根 widget：注入 [RoomStore] 并配置 [MaterialApp]。
 ///
@@ -19,40 +15,31 @@ class VideoTogetherApp extends StatelessWidget {
 
   /// 真实 App 用 [VTWebViewBridge]；测试时由测试代码注入 [FakeVTBridge]。
   RoomStore _buildStore() {
-    final webview = AppWebViewController();
-    final injector = VTInjector(js: _JsAdapter(webview));
-    final bridge = VTWebViewBridge(webview: webview, injector: injector);
-    return RoomStore(bridge: bridge);
+    return RoomStore(); // bridge 由 WatchPage 初始化时绑定
   }
 
   Future<void> _onStart(
     BuildContext context, {
     required String url,
     required bool create,
-    String? roomId,
+    required String roomName,
     required String nickname,
+    String password = '',
+    bool isLocalVideo = false,
   }) async {
-    final store = context.read<RoomStore>();
-    if (create) {
-      // VtLite 协议下房间名即房间唯一标识；创建时以昵称作为房间名
-      await store.createRoom(name: nickname);
-    } else {
-      // 加入时 roomId 即对方告知的房间名
-      await store.joinRoom(name: roomId ?? '');
-    }
     if (!context.mounted) return;
-    if (store.state == RoomStoreState.inRoom) {
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => WatchPage(videoUrl: url, nickname: nickname),
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => WatchPage(
+          videoUrl: url,
+          nickname: nickname,
+          isLocalVideo: isLocalVideo,
+          create: create,
+          roomName: roomName,
+          password: password,
         ),
-      );
-    } else if (store.state == RoomStoreState.error && context.mounted) {
-      final err = store.error;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(err != null ? '$err' : '进入房间失败')),
-      );
-    }
+      ),
+    );
   }
 
   @override
@@ -68,15 +55,19 @@ class VideoTogetherApp extends StatelessWidget {
             onStart: ({
               required String url,
               required bool create,
-              String? roomId,
+              required String roomName,
               required String nickname,
+              String password = '',
+              bool isLocalVideo = false,
             }) =>
                 _onStart(
               ctx,
               url: url,
               create: create,
-              roomId: roomId,
+              roomName: roomName,
               nickname: nickname,
+              password: password,
+              isLocalVideo: isLocalVideo,
             ),
           ),
         ),
@@ -131,17 +122,5 @@ class VideoTogetherApp extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-/// 把 [AppWebViewController] 适配成 [JsEvaluator]，
-/// 让 [VTInjector] 通过业务层封装调用 WebView 的 evaluateJavascript。
-class _JsAdapter implements JsEvaluator {
-  final AppWebViewController _ctrl;
-  _JsAdapter(this._ctrl);
-
-  @override
-  Future<dynamic> evaluate(String source) async {
-    return _ctrl.evaluateJavascript(source);
   }
 }

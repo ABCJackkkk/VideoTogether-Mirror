@@ -46,3 +46,19 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# 本地临时调试脚本
+_*.ps1
+
+# 预览图（非项目资源）
+app_icon_preview.jpg
+app_icon_preview.png
+
+# 网站构建产物与依赖
+site/node_modules/
+site/dist/
+site/tsconfig.tsbuildinfo
+site/tsconfig.node.tsbuildinfo
+
+# 调研用的 VT 源码快照（不公开）
+.vt-tmp/

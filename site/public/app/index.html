@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#F7F5F2">
+  <title>异地同看</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="apple-touch-icon" href="icon-192.png">
+</head>
+<body>
+
+<!-- ===== 顶部栏（观影页才显示） ===== -->
+<header class="topbar hidden" id="topbar">
+  <div class="topbar-title">异地同看</div>
+  <div class="topbar-info">
+    <div class="room-meta">
+      <div class="room-name" id="roomNameDisplay">—</div>
+      <div class="room-sub"><span id="memberCount">0</span> 人在线</div>
+    </div>
+    <button class="icon-btn" id="copyBtn" title="复制房间名" aria-label="复制房间名">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+      </svg>
+    </button>
+    <button class="icon-btn" id="leaveBtn" title="离开房间" aria-label="离开房间">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+        <polyline points="16 17 21 12 16 7"></polyline>
+        <line x1="21" y1="12" x2="9" y2="12"></line>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<!-- ===== 首页 ===== -->
+<main class="home-wrap" id="homePage">
+  <div class="home-card">
+    <h1>异地同看</h1>
+    <p class="subtitle">一起看 · 同步播放 · 实时聊天</p>
+
+    <div class="field">
+      <label>视频来源</label>
+      <label class="file-drop" id="fileDrop">
+        <span id="fileDropHint">点击选择本地视频文件（mp4 / mkv / webm）</span>
+        <input type="file" id="fileInput" accept="video/*">
+        <div class="filename" id="fileName"></div>
+      </label>
+    </div>
+
+    <div class="field">
+      <label>或粘贴视频直链 / YouTube 链接</label>
+      <input type="url" id="urlInput" placeholder="https://example.com/movie.mp4 或 https://youtu.be/xxx" autocapitalize="off" autocorrect="off">
+      <div class="hint">支持 mp4 直链、YouTube 链接</div>
+    </div>
+
+    <div class="field">
+      <label>昵称</label>
+      <input type="text" id="nicknameInput" placeholder="给自己起个名字" value="匿名" maxlength="20">
+    </div>
+
+    <div class="field">
+      <label>房间名</label>
+      <input type="text" id="roomNameInput" placeholder="创建时自拟，加入时填对方告知的房间名" maxlength="40" autocapitalize="off">
+    </div>
+
+    <div class="field">
+      <label>房间密码</label>
+      <input type="password" id="passwordInput" placeholder="可选，留空表示无密码" maxlength="40">
+    </div>
+
+    <label class="checkbox-row">
+      <input type="checkbox" id="joinCheckbox">
+      <span>我要加入已有房间</span>
+    </label>
+
+    <button class="btn-primary" id="startBtn">创建房间</button>
+  </div>
+</main>
+
+<!-- ===== 观影页 ===== -->
+<main class="watch-wrap hidden" id="watchPage">
+  <div class="video-stage" id="videoStage">
+    <div class="placeholder">正在加载视频...</div>
+  </div>
+</main>
+
+<!-- ===== 聊天浮层 ===== -->
+<button class="chat-toggle hidden" id="chatToggle" aria-label="打开聊天">
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
+  </svg>
+</button>
+
+<section class="chat-panel hidden" id="chatPanel" aria-label="聊天面板">
+  <header class="chat-header">
+    <span class="title">聊天</span>
+    <button class="icon-btn" id="chatCloseBtn" aria-label="收起聊天">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6 9 12 15 18 9"></polyline>
+      </svg>
+    </button>
+  </header>
+  <div class="chat-messages" id="chatMessages">
+    <div class="empty">暂无消息</div>
+  </div>
+  <div class="chat-input">
+    <input type="text" id="chatInput" placeholder="输入消息..." maxlength="200" autocapitalize="off">
+    <button id="chatSendBtn">发送</button>
+  </div>
+</section>
+
+<!-- 提示 toast -->
+<div class="toast hidden" id="toast"></div>
+
+<script src="vt-lite.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
