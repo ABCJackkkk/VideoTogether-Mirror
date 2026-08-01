@@ -33,6 +33,8 @@ class WatchPage extends StatefulWidget {
 class _WatchPageState extends State<WatchPage> {
   late final AppWebViewController _webviewCtrl;
   late final VTWebViewBridge _bridge;
+  RoomStore? _store;
+  bool _errorHandled = false;
   bool _loaded = false;
   bool _loading = false;
   int _progress = 0;
@@ -46,7 +48,8 @@ class _WatchPageState extends State<WatchPage> {
     super.initState();
     _webviewCtrl = AppWebViewController();
     final injector = VTInjector(js: _JsAdapter(_webviewCtrl));
-    _bridge = VTWebViewBridge(webview: _webviewCtrl, injector: injector);
+    _bridge = VTWebViewBridge(webview: _webviewCtrl, injector: injector)
+      ..nickname = widget.nickname;
 
     if (widget.isLocalVideo && widget.videoUrl.isNotEmpty) {
       final path = widget.videoUrl.replaceAll('\\', '/');
@@ -81,8 +84,24 @@ class _WatchPageState extends State<WatchPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final store = context.read<RoomStore>();
+      _store = store;
+      store.addListener(_onStoreChanged);
       store.bindBridge(_bridge);
     });
+  }
+
+  /// 监听 RoomStore：进入房间失败（房间不存在/密码错误）时提示并返回
+  void _onStoreChanged() {
+    final store = _store;
+    if (store == null || !mounted) return;
+    if (store.state == RoomStoreState.error && !_errorHandled) {
+      _errorHandled = true;
+      final msg = store.lastError ?? '进入房间失败';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(msg)),
+      );
+      Navigator.of(context).pop();
+    }
   }
 
   /// 在 VtLite JS 注入完成后调用 createRoom/joinRoom
@@ -100,6 +119,7 @@ class _WatchPageState extends State<WatchPage> {
             name: widget.roomName, password: widget.password);
       }
     } catch (e) {
+      _errorHandled = true;
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('进入房间失败: $e')));
@@ -109,6 +129,10 @@ class _WatchPageState extends State<WatchPage> {
 
   @override
   void dispose() {
+    _store?.removeListener(_onStoreChanged);
+    // 返回/退出时主动离开房间：停止上报/心跳定时器、断开 WS，
+    // 避免残留连接继续占用房间或反复重连
+    _bridge.leaveRoom();
     _bridge.dispose();
     super.dispose();
   }
@@ -190,10 +214,19 @@ class _WatchPageState extends State<WatchPage> {
                       },
                       onLoadStop: (controller, url) async {
                         if (url != null) _currentLoadedUrl = url.toString();
-                        setState(() => _loading = false);
-                        if (_loaded) return;
-                        _loaded = true;
+                        if (mounted) setState(() => _loading = false);
+                        // await 前获取 messenger，避免 async gap 后使用 context
                         final messenger = ScaffoldMessenger.of(context);
+                        // 页面整页跳转（新域名/新文档）后 JS 上下文会重置，
+                        // VtLite 随之丢失：检测到缺失时重新注入并重新进房
+                        final hasVt = await _bridge.hasVtLite();
+                        if (!hasVt) {
+                          _loaded = false;
+                          _roomInited = false;
+                          _bridge.reset();
+                        }
+                        if (_loaded || !mounted) return;
+                        _loaded = true;
                         // 注入 VtLite JS（无 video 也注入，内部自动轮询）
                         try {
                           await _bridge.onPageLoaded();
@@ -206,7 +239,7 @@ class _WatchPageState extends State<WatchPage> {
                         // 避免重复调用导致角色被重置、定时器混乱）
                         await _initRoom();
                       },
-                      onLoadError: (controller, url, code, message) async {
+                      onReceivedError: (controller, request, error) async {
                         // 加载失败时仍尝试注入 JS（initialData 空白页可注入）
                         // 保证加入方/本地视频方房间流程能继续
                         if (_loaded) return;

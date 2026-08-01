@@ -63,8 +63,9 @@ export function Hero() {
           </div>
 
           <a
-            href="/downloads/app-release.apk"
-            download
+            href="https://ghfast.top/https://github.com/ABCJackkkk/VideoTogether-Mirror/releases/latest/download/app-release.apk"
+            target="_blank"
+            rel="noopener noreferrer"
             className="bg-wandor-dark text-[#fafafa] cursor-pointer font-sans text-[15px] font-medium uppercase tracking-[0.04em] px-5 py-3.5 rounded-full transition-all hover:bg-[#333] active:scale-95 no-underline"
           >
             下载 Android
@@ -91,8 +92,9 @@ export function Hero() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {/* Android APK */}
               <a
-                href="/downloads/app-release.apk"
-                download
+                href="https://ghfast.top/https://github.com/ABCJackkkk/VideoTogether-Mirror/releases/latest/download/app-release.apk"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="group bg-black/70 hover:bg-black backdrop-blur-md border border-white/20 rounded-2xl p-5 flex flex-col items-start transition-all hover:scale-[1.02] active:scale-95 no-underline"
               >
                 <Smartphone className="w-6 h-6 text-white mb-3" />

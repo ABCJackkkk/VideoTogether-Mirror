@@ -101,6 +101,7 @@ class RoomStore extends ChangeNotifier {
     _room = null;
     _messages.clear();
     _wsStatus = WsStatus.disconnected;
+    _error = null;
     _lastError = null;
     _state = RoomStoreState.idle;
     notifyListeners();
@@ -132,13 +133,19 @@ class RoomStore extends ChangeNotifier {
         // 合并而非替换：服务端有时不下发 memberCount（如 /room/update_member 响应），
         // 此时保留旧值，避免显示 0
         if (_room != null && _room!.name == room.name) {
+          // 防御：join 等不完整更新（无有效时间戳）不覆盖播放状态，
+          // 避免缺字段默认值把当前进度/暂停态重置为 0/暂停
+          final hasValidTs = room.lastUpdateServerTime > 0;
           _room = _room!.copyWith(
-            currentTime: room.currentTime,
-            duration: room.duration,
-            paused: room.paused,
-            playbackRate: room.playbackRate,
-            lastUpdateServerTime: room.lastUpdateServerTime,
-            url: room.url,
+            currentTime: hasValidTs ? room.currentTime : _room!.currentTime,
+            duration: hasValidTs ? room.duration : _room!.duration,
+            paused: hasValidTs ? room.paused : _room!.paused,
+            playbackRate:
+                hasValidTs ? room.playbackRate : _room!.playbackRate,
+            lastUpdateServerTime: hasValidTs
+                ? room.lastUpdateServerTime
+                : _room!.lastUpdateServerTime,
+            url: room.url.isEmpty ? _room!.url : room.url,
             memberCount: room.memberCountValue ?? _room!.memberCountValue,
           );
         } else {

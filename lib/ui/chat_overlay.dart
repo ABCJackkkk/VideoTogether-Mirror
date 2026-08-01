@@ -26,6 +26,7 @@ class ChatOverlay extends StatefulWidget {
 class _ChatOverlayState extends State<ChatOverlay> {
   bool _expanded = false;
   final _inputCtrl = TextEditingController();
+  final _scrollCtrl = ScrollController();
 
   // Aui 色板
   static const Color _kBgPaper = Color(0xFFF7F5F2);
@@ -35,8 +36,29 @@ class _ChatOverlayState extends State<ChatOverlay> {
   static const Color _kBorder = Color(0xFFE0DCD6);
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 新消息到达时自动滚到底部
+    if (widget.messages.length != oldWidget.messages.length) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+    }
+  }
+
+  void _scrollToBottom() {
+    if (!_scrollCtrl.hasClients) return;
+    _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+  }
+
+  @override
   void dispose() {
     _inputCtrl.dispose();
+    _scrollCtrl.dispose();
     super.dispose();
   }
 
@@ -121,6 +143,7 @@ class _ChatOverlayState extends State<ChatOverlay> {
                       ),
                     )
                   : ListView.builder(
+                      controller: _scrollCtrl,
                       padding: const EdgeInsets.symmetric(vertical: 4),
                       itemCount: widget.messages.length,
                       itemBuilder: (ctx, i) {

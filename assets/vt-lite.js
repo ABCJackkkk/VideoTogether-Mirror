@@ -70,6 +70,9 @@
   // 事件监听器表：{ event: [cb, cb, ...] }
   var listeners = {};
 
+  // 聊天昵称（发送消息时写入 voiceId 字段，接收端据此显示发送者）
+  var senderName = "";
+
   // 事件队列：供 Dart 侧 flushEvents() 轮询拉取
   // 不依赖 callHandler（在 initialData/某些页面中可能不可用）
   var eventQueue = [];
@@ -112,8 +115,12 @@
         try { cb(data); } catch (e) {}
       });
     }
-    // 存入队列，供 Dart 侧 flushEvents() 拉取
+    // 存入队列，供 Dart 侧 flushEvents() 拉取；
+    // 上限 200 条：防止 Dart 侧轮询中断时队列无限增长
     eventQueue.push({ event: event, data: data });
+    if (eventQueue.length > 200) {
+      eventQueue.splice(0, eventQueue.length - 200);
+    }
   }
 
   // Dart 侧轮询调用：返回并清空事件队列
@@ -131,12 +138,27 @@
     }
   }
 
+  // 服务端消息外壳归一化：兼容 {method, data} 与 {data: {method, data}} 两种格式
+  function normalizeServerMsg(msg) {
+    if (msg && msg.data && typeof msg.data === "object" &&
+        typeof msg.data.method === "string" && !msg.method) {
+      return { method: msg.data.method, data: msg.data.data || {} };
+    }
+    return msg;
+  }
+
   // ===== 时间同步 =====
   // 启动时 GET /timestamp，计算 timeOffset = serverTime - localTime
-  // 用于成员侧播放进度外推
+  // 用于成员侧播放进度外推。5 秒超时，避免网络异常时阻塞流程
   async function syncTime() {
+    var ctrl = null, timer = null;
     try {
-      var resp = await fetch(API_HOST + "/timestamp");
+      if (typeof AbortController !== "undefined") {
+        ctrl = new AbortController();
+        timer = setTimeout(function () { ctrl.abort(); }, 5000);
+      }
+      var resp = await fetch(API_HOST + "/timestamp", ctrl ? { signal: ctrl.signal } : {});
+      if (timer) clearTimeout(timer);
       var r = await resp.json();
       if (r && typeof r.timestamp === "number") {
         timeOffset = r.timestamp - Date.now() / 1000;
@@ -144,6 +166,8 @@
     } catch (e) {
       // 时间同步失败不致命，timeOffset 保持 0，进度外推会有偏差
       emit("error", { message: "sync_time_failed", error: String(e) });
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -159,7 +183,9 @@
       } catch (e) {
         continue; // 单行解析失败跳过，不影响其他行
       }
-      if (!msg || !msg.method) continue;
+      if (!msg) continue;
+      msg = normalizeServerMsg(msg);
+      if (!msg.method) continue;
       var data = msg.data || {};
       // 错误响应：VT 服务器返回 { method: "...", data: { errorMessage: "..." } }
       if (data.errorMessage != null) {
@@ -193,7 +219,22 @@
           msg.method === "/room/update_member" ||
           msg.method === "/room/join") {
         if (typeof data.memberCount === "number") memberCount = data.memberCount;
-        emit("room_update", data);
+        if (msg.method === "/room/join") {
+          // join 成功响应通常不携带播放状态；只广播成员数与房间名，
+          // 避免缺字段默认值把成员视频暂停/seek 到 0
+          var joinData = { name: data.name || roomName, memberCount: memberCount };
+          if (typeof data.currentTime === "number") joinData.currentTime = data.currentTime;
+          if (typeof data.duration === "number") joinData.duration = data.duration;
+          if (typeof data.paused === "boolean") joinData.paused = data.paused;
+          if (typeof data.playbackRate === "number") joinData.playbackRate = data.playbackRate;
+          if (typeof data.url === "string") joinData.url = data.url;
+          var ts = data.lastUpdateServerTime;
+          if (typeof ts !== "number") ts = data.lastUpdateClientTime;
+          if (typeof ts === "number") joinData.lastUpdateServerTime = ts;
+          emit("room_update", joinData);
+        } else {
+          emit("room_update", data);
+        }
         // 房主收到成员心跳时，立即触发一次上报，让成员尽快拿到最新状态
         if (role === ROLE.MASTER && msg.method === "/room/update_member") {
           if (videoElement) {
@@ -426,26 +467,30 @@
 
   // ===== 成员同步逻辑（只注册一次，靠 role 守卫） =====
   // 收到 room_update 时：外推真实进度，差 > 1s 则 seek；同步 paused/playbackRate
+  // 守卫：仅当更新携带明确的播放字段时才动视频，避免 join 等不完整更新误伤
   on("room_update", function (room) {
     if (role !== ROLE.MEMBER || !videoElement || !room) return;
     var v = videoElement;
     try {
       // 外推真实进度：realCurrent = currentTime + (now - lastUpdateServerTime) * rate
       // lastUpdateServerTime 缺失或异常（<=0）时不外推，直接用 currentTime
-      var realCurrent = room.currentTime;
-      var lastServer = room.lastUpdateServerTime;
-      if (typeof lastServer === "number" && lastServer > 0) {
+      var hasValidTime = typeof room.currentTime === "number" &&
+          typeof room.lastUpdateServerTime === "number" &&
+          room.lastUpdateServerTime > 0;
+      if (hasValidTime) {
+        var realCurrent = room.currentTime;
+        var lastServer = room.lastUpdateServerTime;
         var elapsed = Date.now() / 1000 + timeOffset - lastServer;
         // 仅在合理范围内外推（0~3600s），避免时间戳异常导致跳到几十亿秒
         if (elapsed >= 0 && elapsed < 3600) {
           realCurrent = room.currentTime + elapsed * (room.playbackRate || 1);
         }
+        if (typeof v.currentTime === "number" &&
+            Math.abs(v.currentTime - realCurrent) > 1) {
+          v.currentTime = realCurrent;
+        }
       }
-      if (typeof v.currentTime === "number" &&
-          Math.abs(v.currentTime - realCurrent) > 1) {
-        v.currentTime = realCurrent;
-      }
-      if (v.paused !== !!room.paused) {
+      if (typeof room.paused === "boolean" && v.paused !== room.paused) {
         if (room.paused) {
           try { v.pause(); } catch (e) {}
         } else {
@@ -463,8 +508,9 @@
 
   // ===== 公开 API =====
 
-  async function createRoom(name, pwd, videoEl) {
+  async function createRoom(name, pwd, videoEl, nickname) {
     if (!name) throw new Error("room name required");
+    destroyed = false;
     stopMasterTimer();
     stopMemberTimer();
     roomName = String(name);
@@ -472,14 +518,16 @@
     role = ROLE.MASTER;
     videoElement = videoEl || null;
     memberCount = 1;
+    if (nickname) senderName = String(nickname);
     await syncTime();
     if (!ws) connectWs(0);
     startMasterTimer();
     if (!videoElement) startVideoPolling();
   }
 
-  async function joinRoom(name, pwd, videoEl) {
+  async function joinRoom(name, pwd, videoEl, nickname) {
     if (!name) throw new Error("room name required");
+    destroyed = false;
     stopMasterTimer();
     stopMemberTimer();
     roomName = String(name);
@@ -487,6 +535,7 @@
     role = ROLE.MEMBER;
     videoElement = videoEl || null;
     memberCount = 0;
+    if (nickname) senderName = String(nickname);
     await syncTime();
     if (!ws) connectWs(0);
     // 若 WS 已 open 立即发 join；否则 onopen 会补发
@@ -514,12 +563,19 @@
   function sendText(msg) {
     if (!ws || !wsReady) {
       emit("error", { message: "ws_not_open" });
-      return;
+      return "";
     }
+    var id = uuid();
     send({
       method: "send_txtmsg",
-      data: { msg: String(msg), id: uuid(), voiceId: "" }
+      data: { msg: String(msg), id: id, voiceId: senderName || "" }
     });
+    return id;
+  }
+
+  // 设置聊天昵称（发送消息时写入 voiceId，接收端据此显示发送者）
+  function setNickname(name) {
+    senderName = name ? String(name) : "";
   }
 
   function getState() {
@@ -558,6 +614,7 @@
       joinRoom: joinRoom,
       leaveRoom: leaveRoom,
       sendText: sendText,
+      setNickname: setNickname,
       getState: getState,
       setVideo: setVideo,
       flushEvents: flushEvents,

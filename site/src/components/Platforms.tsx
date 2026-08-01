@@ -6,7 +6,7 @@ const platforms = [
     title: 'Android',
     subtitle: '原生 App',
     desc: '安装即用，支持本地视频、YouTube、视频直链同步播放。WebSocket 断线自动重连。',
-    action: { label: '下载 APK', href: '/downloads/app-release.apk', download: true },
+    action: { label: '下载 APK', href: 'https://ghfast.top/https://github.com/ABCJackkkk/VideoTogether-Mirror/releases/latest/download/app-release.apk', download: false, external: true },
     badge: '推荐',
   },
   {
@@ -59,6 +59,7 @@ export function Platforms() {
                 <a
                   href={p.action.href}
                   {...(p.action.download ? { download: true } : {})}
+                  {...(p.action.external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
                   className="inline-flex items-center gap-2 bg-wandor-dark text-white text-sm font-medium uppercase tracking-wider px-5 py-3 rounded-full hover:bg-[#333] active:scale-95 transition-all no-underline"
                 >
                   {p.action.label}

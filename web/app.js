@@ -137,22 +137,74 @@
   }
 
   // ===== VtLite 事件绑定 =====
+  // 本地已回显的消息 id（服务端广播回来时按 id 去重，避免自己的消息显示两次）
+  const myMsgIds = new Set();
+
   VtLite.on("ws_open", () => {
     showToast("已连接到同步服务器");
   });
   VtLite.on("ws_close", () => {
-    showToast("与同步服务器连接断开");
+    showToast("与同步服务器连接断开，正在重连...");
   });
   VtLite.on("text_message", (msg) => {
-    appendChatMessage(msg.sender || "匿名", msg.text);
+    if (msg.id && myMsgIds.has(msg.id)) return;
+    appendChatMessage(msg.voiceId || "匿名", msg.text);
   });
+
+  let followedUrl = null; // 已跟随的房主视频 URL
   VtLite.on("room_update", (room) => {
     if (room.name) roomNameDisplay.textContent = room.name;
     memberCount.textContent = String(room.memberCount || 0);
+    // 成员自动跟随房主视频 URL（仅支持 mp4/webm 直链与 YouTube）
+    try {
+      const st = VtLite.getState();
+      if (st.role === "member" && room.url && room.url !== followedUrl) {
+        const ytId = parseYouTubeId(room.url);
+        const isDirect = /^https?:\/\/.+\.(mp4|webm|ogg)(\?.*)?$/i.test(room.url);
+        if (ytId) {
+          followedUrl = room.url;
+          loadYouTube(ytId);
+          waitYtReady().then(() => VtLite.setVideo(makeYoutubePseudoVideo()));
+          showToast("已跟随房主视频");
+        } else if (isDirect) {
+          followedUrl = room.url;
+          const v = loadVideoElement(room.url);
+          VtLite.setVideo(v);
+          showToast("已跟随房主视频");
+        }
+      }
+    } catch (e) {}
   });
   VtLite.on("error", (err) => {
     console.warn("VtLite error:", err);
+    if (err && err.message) {
+      const map = {
+        password_error: "房间密码错误",
+        room_not_found: "房间不存在，请检查房间名",
+        ws_all_urls_failed: "无法连接同步服务器，请检查网络",
+        ws_construct_failed: "WebSocket 创建失败",
+        ws_not_open: "连接未建立，请稍候",
+        sync_time_failed: "时间同步失败，进度可能有偏差",
+        member_sync_error: "同步播放状态失败"
+      };
+      showToast(map[err.message] || (err.error ? "同步错误：" + err.error : "同步错误"), 3200);
+    }
   });
+
+  // 等待 YouTube 播放器就绪
+  function waitYtReady() {
+    return new Promise((resolve) => {
+      let tries = 0;
+      const wait = setInterval(() => {
+        tries++;
+        if (ytPlayer && typeof ytPlayer.getCurrentTime === "function") {
+          clearInterval(wait); resolve();
+        } else if (tries > 50) {
+          clearInterval(wait); resolve();
+        }
+      }, 200);
+    });
+  }
 
   // ===== 聊天 =====
   function appendChatMessage(sender, text) {
@@ -168,7 +220,9 @@
   function sendChat() {
     const text = chatInput.value.trim();
     if (!text) return;
-    VtLite.sendText(text);
+    VtLite.setNickname(nickname || "匿名");
+    const id = VtLite.sendText(text);
+    if (id) myMsgIds.add(id);
     appendChatMessage(nickname || "我", text);
     chatInput.value = "";
   }
@@ -190,17 +244,26 @@
       videoReady = true;
     } else {
       const url = urlInput.value.trim();
-      if (!url) { showToast("请选择视频文件或粘贴视频链接"); return; }
-      const ytId = parseYouTubeId(url);
-      if (ytId) {
-        loadYouTube(ytId);
-        videoReady = true;
-      } else if (/^https?:\/\/.+\.(mp4|webm|ogg|mkv)(\?.*)?$/i.test(url)) {
-        loadVideoElement(url);
-        videoReady = true;
+      if (!url) {
+        // 加入方可留空视频：等房主上报 URL 后自动跟随加载
+        if (isJoining) {
+          videoReady = false;
+        } else {
+          showToast("请选择视频文件或粘贴视频链接");
+          return;
+        }
       } else {
-        showToast("仅支持 mp4/webm 直链或 YouTube 链接");
-        return;
+        const ytId = parseYouTubeId(url);
+        if (ytId) {
+          loadYouTube(ytId);
+          videoReady = true;
+        } else if (/^https?:\/\/.+\.(mp4|webm|ogg)(\?.*)?$/i.test(url)) {
+          loadVideoElement(url);
+          videoReady = true;
+        } else {
+          showToast("仅支持 mp4/webm 直链或 YouTube 链接");
+          return;
+        }
       }
     }
 
@@ -216,19 +279,9 @@
     if (currentVideoSrc === "youtube") {
       // 等 ytPlayer 准备好
       showToast("正在连接 YouTube...");
-      await new Promise((resolve) => {
-        let tries = 0;
-        const wait = setInterval(() => {
-          tries++;
-          if (ytPlayer && typeof ytPlayer.getCurrentTime === "function") {
-            clearInterval(wait); resolve();
-          } else if (tries > 50) {
-            clearInterval(wait); resolve();
-          }
-        }, 200);
-      });
+      await waitYtReady();
       vtVideo = makeYoutubePseudoVideo();
-    } else {
+    } else if (videoEl) {
       vtVideo = videoEl;
     }
 
@@ -256,6 +309,8 @@
     chatPanel.classList.add("hidden");
     chatMessages.innerHTML = '<div class="empty">暂无消息</div>';
     selectedFile = null;
+    followedUrl = null;
+    myMsgIds.clear();
     fileName.textContent = "";
     fileDropHint.textContent = "点击选择本地视频文件（mp4 / mkv / webm）";
     urlInput.value = "";

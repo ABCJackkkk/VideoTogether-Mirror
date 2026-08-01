@@ -22,6 +22,9 @@ class VTWebViewBridge implements VTBridge {
   final AppWebViewController webview;
   final VTInjector injector;
 
+  /// 聊天昵称：透传给 VtLite，发送消息时写入 voiceId 字段
+  String nickname = '';
+
   final StreamController<VTEvent> _events =
       StreamController<VTEvent>.broadcast();
   bool _injected = false;
@@ -38,7 +41,20 @@ class VTWebViewBridge implements VTBridge {
     if (_injected) return;
     await injector.injectOnly();
     _injected = true;
+    if (nickname.isNotEmpty) {
+      await _eval('window.VtLite.setNickname(${_jsStr(nickname)})');
+    }
     startPolling();
+  }
+
+  /// 查询页面里是否已存在 VtLite（页面整页跳转后 JS 上下文会丢失）
+  Future<bool> hasVtLite() async {
+    try {
+      final result = await webview.evaluateJavascript('!!window.VtLite');
+      return result == true || result == 'true';
+    } catch (_) {
+      return false;
+    }
   }
 
   /// 重置注入状态（URL 变化后需重新注入）
@@ -95,7 +111,8 @@ class VTWebViewBridge implements VTBridge {
   Future<Room> createRoom({required String name, String password = ''}) async {
     await _eval(
       'window.VtLite.createRoom('
-      '${_jsStr(name)}, ${_jsStr(password)}, document.querySelector("video")'
+      '${_jsStr(name)}, ${_jsStr(password)}, '
+      'document.querySelector("video"), ${_jsStr(nickname)}'
       ')',
     );
     // VtLite.createRoom 返回 void，构造 Room 由本地完成
@@ -111,7 +128,8 @@ class VTWebViewBridge implements VTBridge {
   Future<Room> joinRoom({required String name, String password = ''}) async {
     await _eval(
       'window.VtLite.joinRoom('
-      '${_jsStr(name)}, ${_jsStr(password)}, document.querySelector("video")'
+      '${_jsStr(name)}, ${_jsStr(password)}, '
+      'document.querySelector("video"), ${_jsStr(nickname)}'
       ')',
     );
     // VtLite.joinRoom 返回 void，房间状态通过 room_update 事件异步到达
@@ -125,7 +143,11 @@ class VTWebViewBridge implements VTBridge {
   @override
   Future<void> leaveRoom() async {
     stopPolling();
-    await _eval('window.VtLite.leaveRoom()');
+    try {
+      await _eval('window.VtLite.leaveRoom()');
+    } catch (_) {
+      // WebView 可能已销毁（页面退出时），静默忽略
+    }
   }
 
   @override

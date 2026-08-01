@@ -109,6 +109,57 @@ void main() {
     expect(store.state, RoomStoreState.inRoom);
   });
 
+  test('无有效时间戳的 room_update 不覆盖播放状态（join 响应防御）', () async {
+    final bridge = FakeVTBridge();
+    final store = RoomStore(bridge: bridge);
+    await store.createRoom(name: 'test');
+
+    // 先收到真实房主状态
+    bridge.emit(const RoomUpdateEvent(room: Room(
+      id: 'test',
+      name: 'test',
+      members: [],
+      currentTime: 300.0,
+      duration: 600,
+      paused: false,
+      playbackRate: 1.0,
+      lastUpdateServerTime: 1785095000.0,
+      memberCount: 3,
+    )));
+    await Future.delayed(Duration.zero);
+    expect(store.room!.currentTime, 300.0);
+    expect(store.room!.paused, isFalse);
+
+    // join 成功响应：无 lastUpdateServerTime，currentTime 默认 0、paused 默认 true
+    bridge.emit(const RoomUpdateEvent(room: Room(
+      id: 'test',
+      name: 'test',
+      members: [],
+      memberCount: 4,
+    )));
+    await Future.delayed(Duration.zero);
+
+    // 播放状态必须保留，只更新成员数
+    expect(store.room!.currentTime, 300.0);
+    expect(store.room!.paused, isFalse);
+    expect(store.room!.memberCount, 4);
+  });
+
+  test('leaveRoom 后 error 与 lastError 被清空', () async {
+    final bridge = FakeVTBridge();
+    final store = RoomStore(bridge: bridge);
+    await store.createRoom(name: 'test');
+
+    bridge.emit(const ErrorEvent(message: 'room_not_found'));
+    await Future.delayed(Duration.zero);
+    expect(store.state, RoomStoreState.error);
+
+    await store.leaveRoom();
+    expect(store.state, RoomStoreState.idle);
+    expect(store.error, isNull);
+    expect(store.lastError, isNull);
+  });
+
   test('sendMessage 空文本不发送', () async {
     final bridge = FakeVTBridge();
     final store = RoomStore(bridge: bridge);
