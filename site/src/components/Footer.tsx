@@ -10,7 +10,7 @@ export function Footer() {
           基于 VideoTogether 协议 · CC BY-NC 4.0
         </p>
         <div className="flex items-center gap-5 text-sm text-wandor-muted">
-          <a href="https://ghfast.top/https://github.com/ABCJackkkk/VideoTogether-Mirror/releases/latest/download/app-release.apk" target="_blank" rel="noopener noreferrer" className="hover:text-wandor-text transition-colors">Android APK</a>
+          <a href="/downloads/app-release.apk" target="_blank" rel="noopener noreferrer" className="hover:text-wandor-text transition-colors">Android APK</a>
           <a href="https://apps.apple.com/cn/app/videotogether/id6443755429" target="_blank" rel="noopener noreferrer" className="hover:text-wandor-text transition-colors">iOS App Store</a>
         </div>
       </div>

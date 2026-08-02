@@ -70,6 +70,12 @@
   // 事件监听器表：{ event: [cb, cb, ...] }
   var listeners = {};
 
+  // 成员 join 重试状态：房主可能还没初始化房间，收到 room_not_found 时
+  // 不立即报错，而是在 memberTimer 里每 2 秒重试（对照 VT 原版 ScheduledTask）
+  var joinRetryCount = 0;
+  var MAX_JOIN_RETRIES = 15; // 15 次 × 2 秒 = 30 秒超时
+  var joinSucceeded = false;
+
   // 聊天昵称（发送消息时写入 voiceId 字段，接收端据此显示发送者）
   var senderName = "";
 
@@ -195,7 +201,14 @@
         } else if (errMsg.indexOf("not found") >= 0 ||
                    errMsg.indexOf("不存在") >= 0 ||
                    errMsg.indexOf("room not exist") >= 0) {
-          emit("error", { message: "room_not_found", error: errMsg });
+          // 成员收到 room_not_found：房主可能还没初始化房间。
+          // 对照 VT 原版 ScheduledTask：不立即报错，由 memberTimer 每 2 秒重试。
+          // 只有重试次数用完才 emit error。
+          if (role === ROLE.MEMBER && joinRetryCount < MAX_JOIN_RETRIES) {
+            // 静默重试，不 emit error
+          } else {
+            emit("error", { message: "room_not_found", error: errMsg });
+          }
         } else {
           emit("error", { message: "server_error", error: errMsg });
         }
@@ -219,6 +232,8 @@
           msg.method === "/room/update_member" ||
           msg.method === "/room/join") {
         if (typeof data.memberCount === "number") memberCount = data.memberCount;
+        // 收到任何房间状态广播都说明 join 成功了
+        if (role === ROLE.MEMBER) joinSucceeded = true;
         if (msg.method === "/room/join") {
           // join 成功响应通常不携带播放状态；只广播成员数与房间名，
           // 避免缺字段默认值把成员视频暂停/seek 到 0
@@ -290,8 +305,9 @@
       wsReady = true;
       reconnectAttempts = 0; // 连接成功，重置重连计数
       emit("ws_open", {});
-      // 重连场景：若已是成员，重新发 join 让服务端推送房间状态
+      // 成员：重连后需要重新 join（joinSucceeded 保持 false 让 memberTimer 驱动重试）
       if (role === ROLE.MEMBER && roomName) {
+        joinSucceeded = false; // 重连后重新 join
         send({ method: "/room/join", data: { name: roomName, password: password } });
         if (!memberTimer) startMemberTimer();
       }
@@ -407,13 +423,28 @@
     }
   }
 
-  // ===== 成员心跳循环（每 2 秒发送 /room/update_member） =====
-  // 原版 VideoTogether 协议要求成员定期发送 update_member，
-  // 否则服务器不认为成员在线，memberCount 不会更新。
+  // ===== 成员心跳循环（每 2 秒） =====
+  // 对照 VT 原版 ScheduledTask：每 2 秒发 /room/update_member 保活，
+  // 同时在 join 尚未成功时自动重试 /room/join（房主可能还没初始化房间）。
   function startMemberTimer() {
     stopMemberTimer();
+    // 立即发一次 join（WS 已 open 时生效；未 open 时 onopen 会补发）
+    if (ws && ws.readyState === 1) {
+      send({ method: "/room/join", data: { name: roomName, password: password } });
+    }
     memberTimer = setInterval(function () {
       if (role !== ROLE.MEMBER || !roomName) return;
+      // join 尚未成功：重试 join（房主可能刚初始化房间）
+      if (!joinSucceeded) {
+        if (joinRetryCount >= MAX_JOIN_RETRIES) {
+          emit("error", { message: "room_not_found", error: "重试超时，房间可能不存在" });
+          stopMemberTimer();
+          return;
+        }
+        joinRetryCount++;
+        send({ method: "/room/join", data: { name: roomName, password: password } });
+      }
+      // 始终发送成员心跳，让服务器知道成员在线
       send({
         method: "/room/update_member",
         data: {
@@ -518,11 +549,16 @@
     role = ROLE.MASTER;
     videoElement = videoEl || null;
     memberCount = 1;
+    joinSucceeded = false;
+    joinRetryCount = 0;
     if (nickname) senderName = String(nickname);
-    await syncTime();
+    // syncTime 与 connectWs 并行：减少房间初始化延迟
+    // （syncTime 失败不阻塞，timeOffset 保持 0）
+    var syncP = syncTime();
     if (!ws) connectWs(0);
     startMasterTimer();
     if (!videoElement) startVideoPolling();
+    await syncP;
   }
 
   async function joinRoom(name, pwd, videoEl, nickname) {
@@ -535,13 +571,17 @@
     role = ROLE.MEMBER;
     videoElement = videoEl || null;
     memberCount = 0;
+    joinSucceeded = false;
+    joinRetryCount = 0;
     if (nickname) senderName = String(nickname);
-    await syncTime();
+    // syncTime 与 connectWs 并行
+    var syncP = syncTime();
     if (!ws) connectWs(0);
-    // 若 WS 已 open 立即发 join；否则 onopen 会补发
-    send({ method: "/room/join", data: { name: roomName, password: password } });
+    // join 由 startMemberTimer 驱动：WS open 后立即发 join，
+    // 之后每 2 秒重试直到成功（对照 VT 原版 ScheduledTask）
     startMemberTimer();
     if (!videoElement) startVideoPolling();
+    await syncP;
   }
 
   function leaveRoom() {
@@ -558,6 +598,8 @@
     password = "";
     role = ROLE.NULL;
     memberCount = 0;
+    joinSucceeded = false;
+    joinRetryCount = 0;
   }
 
   function sendText(msg) {
@@ -602,6 +644,8 @@
     password = "";
     role = ROLE.NULL;
     memberCount = 0;
+    joinSucceeded = false;
+    joinRetryCount = 0;
     videoElement = null;
     Object.keys(listeners).forEach(function (k) { delete listeners[k]; });
   }
