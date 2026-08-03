@@ -62,3 +62,6 @@ site/tsconfig.node.tsbuildinfo
 
 # 调研用的 VT 源码快照（不公开）
 .vt-tmp/
+
+# 构建用 Gradle 缓存（沙箱重定向，体积大不入库）
+.gradle-cache/

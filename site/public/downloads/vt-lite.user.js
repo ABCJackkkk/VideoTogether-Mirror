@@ -34,12 +34,19 @@
   var role = ROLE.NULL;
   var memberCount = 0;
   var masterTimer = null;
+  var memberTimer = null;
   var videoElement = null;
   var intentionalClose = false;
   var destroyed = false;
   var tempUser = "vt_" + Date.now() + "_" + uuid();
   var listeners = {};
   var messages = []; // 聊天消息缓存
+
+  // 成员 join 重试：房主可能还没初始化房间，收到 room_not_found 时
+  // 不立即报错，由 memberTimer 每 2 秒重试（对照 VT 原版 ScheduledTask）
+  var joinRetryCount = 0;
+  var MAX_JOIN_RETRIES = 15; // 15 次 × 2 秒 = 30 秒超时
+  var joinSucceeded = false;
 
   // ============ 工具函数 ============
   function uuid() {
@@ -94,6 +101,26 @@
   }
 
   // ============ WebSocket 消息处理 ============
+  // 错误分类：把服务端错误信息映射为事件类型。
+  // 成员收到 room_not_found：房主可能还没初始化房间，不立即报错，
+  // 由 memberTimer 每 2 秒重试，只有重试次数用完才 emit error。
+  function emitServerError(errMsg) {
+    errMsg = String(errMsg);
+    if (errMsg.indexOf("password") >= 0 || errMsg.indexOf("密码") >= 0) {
+      emit("error", { message: "password_error", error: errMsg });
+    } else if (errMsg.indexOf("not found") >= 0 ||
+               errMsg.indexOf("不存在") >= 0 ||
+               errMsg.indexOf("room not exist") >= 0) {
+      if (role === ROLE.MEMBER && joinRetryCount < MAX_JOIN_RETRIES) {
+        // 静默重试，不 emit error
+      } else {
+        emit("error", { message: "room_not_found", error: errMsg });
+      }
+    } else {
+      emit("error", { message: "server_error", error: errMsg });
+    }
+  }
+
   function handleWsMessage(raw) {
     var lines = String(raw).split("\n");
     for (var i = 0; i < lines.length; i++) {
@@ -103,10 +130,30 @@
       try { msg = JSON.parse(line); } catch (e) { continue; }
       if (!msg || !msg.method) continue;
       var data = msg.data || {};
+      // 错误响应：服务端 WsErrorResponse 格式 { method, errorMessage }，
+      // errorMessage 在顶层（兼容 data.errorMessage 旧格式）
+      var errMsg = null;
+      if (typeof msg.errorMessage === "string" && msg.errorMessage !== "") {
+        errMsg = msg.errorMessage;
+      } else if (typeof data.errorMessage === "string" && data.errorMessage !== "") {
+        errMsg = data.errorMessage;
+      }
+      if (errMsg !== null) { emitServerError(errMsg); continue; }
+      if (data.error || data.code === "error" || msg.method === "error") {
+        emitServerError(String(data.error || data.message || "unknown_error"));
+        continue;
+      }
+      // 关键：服务端广播统一为 RoomResponse 格式 { timestamp, Room: {...} }，
+      // 房间数据嵌套在 data.Room，不展开则成员读不到播放状态
+      if (data.Room && typeof data.Room === "object" && !Array.isArray(data.Room)) {
+        data = data.Room;
+      }
       if (msg.method === "/room/update" ||
           msg.method === "/room/update_member" ||
           msg.method === "/room/join") {
         if (typeof data.memberCount === "number") memberCount = data.memberCount;
+        // 收到任何房间状态广播都说明 join 成功了
+        if (role === ROLE.MEMBER) joinSucceeded = true;
         emit("room_update", data);
       } else if (msg.method === "send_txtmsg") {
         messages.push({
@@ -135,8 +182,17 @@
     ws.onopen = function () {
       wsReady = true;
       emit("ws_open", {});
+      // 成员：WS 连通后重新 join（joinSucceeded 保持 false 让 memberTimer 驱动重试）
       if (role === ROLE.MEMBER && roomName) {
+        joinSucceeded = false;
         send({ method: "/room/join", data: { name: roomName, password: password } });
+        if (!memberTimer) startMemberTimer();
+      }
+      // 房主：WS 连通后立即发一次 update 初始化房间，
+      // 避免成员 joinRoom 时收到 room_not_found；同时启动 2s 上报循环
+      if (role === ROLE.MASTER && roomName) {
+        sendUpdateOnce();
+        if (!masterTimer) startMasterTimer();
       }
     };
     ws.onmessage = function (e) {
@@ -201,6 +257,80 @@
     }
   }
 
+  // 立即发一次 /room/update（房主初始化房间用，对照 VT 原版 CreateRoom）
+  function sendUpdateOnce() {
+    if (role !== ROLE.MASTER || !videoElement) return;
+    var v = videoElement;
+    var currentTime = 0, paused = true, playbackRate = 1, duration = 0;
+    try {
+      currentTime = v.currentTime || 0;
+      paused = !!v.paused;
+      playbackRate = v.playbackRate || 1;
+      duration = v.duration || 0;
+    } catch (e) {}
+    send({
+      method: "/room/update",
+      data: {
+        tempUser: tempUser,
+        password: password,
+        name: roomName,
+        playbackRate: playbackRate,
+        currentTime: currentTime,
+        paused: paused,
+        url: (typeof location !== "undefined" && location.href) || "",
+        lastUpdateClientTime: Date.now() / 1000 + timeOffset,
+        duration: duration,
+        protected: !!password,
+        videoTitle: (typeof document !== "undefined" && document.title) || "",
+        sendLocalTimestamp: Date.now() / 1000,
+        m3u8Url: ""
+      }
+    });
+  }
+
+  // ============ 成员心跳循环（每 2 秒） ============
+  // 对照 VT 原版 ScheduledTask：每 2 秒发 /room/update_member 保活，
+  // join 尚未成功时自动重试 /room/join（房主可能还没初始化房间）
+  function startMemberTimer() {
+    stopMemberTimer();
+    // 立即发一次 join（WS 已 open 时生效；未 open 时 onopen 会补发）
+    if (ws && ws.readyState === 1) {
+      send({ method: "/room/join", data: { name: roomName, password: password } });
+    }
+    memberTimer = setInterval(function () {
+      if (role !== ROLE.MEMBER || !roomName) return;
+      // join 尚未成功：重试 join
+      if (!joinSucceeded) {
+        if (joinRetryCount >= MAX_JOIN_RETRIES) {
+          emit("error", { message: "room_not_found", error: "重试超时，房间可能不存在" });
+          stopMemberTimer();
+          return;
+        }
+        joinRetryCount++;
+        send({ method: "/room/join", data: { name: roomName, password: password } });
+      }
+      // 始终发送成员心跳，让服务器知道成员在线
+      send({
+        method: "/room/update_member",
+        data: {
+          password: password,
+          roomName: roomName,
+          sendLocalTimestamp: Date.now() / 1000,
+          userId: tempUser,
+          isLoadding: false,
+          currentUrl: (typeof location !== "undefined" && location.href) || ""
+        }
+      });
+    }, 2000);
+  }
+
+  function stopMemberTimer() {
+    if (memberTimer) {
+      try { clearInterval(memberTimer); } catch (e) {}
+      memberTimer = null;
+    }
+  }
+
   // ============ 成员同步逻辑 ============
   on("room_update", function (room) {
     if (role !== ROLE.MEMBER || !videoElement || !room) return;
@@ -233,32 +363,43 @@
   async function createRoom(name, pwd, videoEl) {
     if (!name) throw new Error("房间名必填");
     stopMasterTimer();
+    stopMemberTimer();
     roomName = String(name);
     password = String(pwd || "");
     role = ROLE.MASTER;
     videoElement = videoEl || null;
     memberCount = 1;
+    joinSucceeded = false;
+    joinRetryCount = 0;
     await syncTime();
     if (!ws) connectWs(0);
+    // WS 已 open：立即初始化房间；未 open 时由 onopen 补发
+    if (ws && ws.readyState === 1) sendUpdateOnce();
     startMasterTimer();
   }
 
   async function joinRoom(name, pwd, videoEl) {
     if (!name) throw new Error("房间名必填");
     stopMasterTimer();
+    stopMemberTimer();
     roomName = String(name);
     password = String(pwd || "");
     role = ROLE.MEMBER;
     videoElement = videoEl || null;
     memberCount = 0;
+    joinSucceeded = false;
+    joinRetryCount = 0;
     await syncTime();
     if (!ws) connectWs(0);
-    send({ method: "/room/join", data: { name: roomName, password: password } });
+    // join 由 startMemberTimer 驱动：WS open 后立即发 join，
+    // 之后每 2 秒重试直到成功（对照 VT 原版 ScheduledTask）
+    startMemberTimer();
   }
 
   function leaveRoom() {
     intentionalClose = true;
     stopMasterTimer();
+    stopMemberTimer();
     if (ws) { try { ws.close(); } catch (e) {} }
     ws = null;
     wsReady = false;
@@ -266,6 +407,8 @@
     password = "";
     role = ROLE.NULL;
     memberCount = 0;
+    joinSucceeded = false;
+    joinRetryCount = 0;
   }
 
   function sendText(msg) {
@@ -292,6 +435,7 @@
     destroyed = true;
     intentionalClose = true;
     stopMasterTimer();
+    stopMemberTimer();
     if (ws) { try { ws.close(); } catch (e) {} }
     ws = null;
     wsReady = false;
@@ -299,6 +443,8 @@
     password = "";
     role = ROLE.NULL;
     memberCount = 0;
+    joinSucceeded = false;
+    joinRetryCount = 0;
     videoElement = null;
     Object.keys(listeners).forEach(function (k) { delete listeners[k]; });
   }

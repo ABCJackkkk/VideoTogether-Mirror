@@ -178,6 +178,27 @@
   }
 
   // ===== WebSocket 消息处理 =====
+  // 错误分类：把服务端错误信息映射为事件类型。
+  // 成员收到 room_not_found：房主可能还没初始化房间，
+  // 对照 VT 原版 ScheduledTask 不立即报错，由 memberTimer 每 2 秒重试，
+  // 只有重试次数用完才 emit error。
+  function emitServerError(errMsg) {
+    errMsg = String(errMsg);
+    if (errMsg.indexOf("password") >= 0 || errMsg.indexOf("密码") >= 0) {
+      emit("error", { message: "password_error", error: errMsg });
+    } else if (errMsg.indexOf("not found") >= 0 ||
+               errMsg.indexOf("不存在") >= 0 ||
+               errMsg.indexOf("room not exist") >= 0) {
+      if (role === ROLE.MEMBER && joinRetryCount < MAX_JOIN_RETRIES) {
+        // 静默重试，不 emit error
+      } else {
+        emit("error", { message: "room_not_found", error: errMsg });
+      }
+    } else {
+      emit("error", { message: "server_error", error: errMsg });
+    }
+  }
+
   function handleWsMessage(raw) {
     var lines = String(raw).split("\n");
     for (var i = 0; i < lines.length; i++) {
@@ -193,41 +214,31 @@
       msg = normalizeServerMsg(msg);
       if (!msg.method) continue;
       var data = msg.data || {};
-      // 错误响应：VT 服务器返回 { method: "...", data: { errorMessage: "..." } }
-      if (data.errorMessage != null) {
-        var errMsg = String(data.errorMessage);
-        if (errMsg.indexOf("password") >= 0 || errMsg.indexOf("密码") >= 0) {
-          emit("error", { message: "password_error", error: errMsg });
-        } else if (errMsg.indexOf("not found") >= 0 ||
-                   errMsg.indexOf("不存在") >= 0 ||
-                   errMsg.indexOf("room not exist") >= 0) {
-          // 成员收到 room_not_found：房主可能还没初始化房间。
-          // 对照 VT 原版 ScheduledTask：不立即报错，由 memberTimer 每 2 秒重试。
-          // 只有重试次数用完才 emit error。
-          if (role === ROLE.MEMBER && joinRetryCount < MAX_JOIN_RETRIES) {
-            // 静默重试，不 emit error
-          } else {
-            emit("error", { message: "room_not_found", error: errMsg });
-          }
-        } else {
-          emit("error", { message: "server_error", error: errMsg });
-        }
+
+      // 错误响应：服务端 WsErrorResponse 格式 { method, errorMessage }，
+      // errorMessage 在顶层（兼容 data.errorMessage 的旧格式）
+      var errMsg = null;
+      if (typeof msg.errorMessage === "string" && msg.errorMessage !== "") {
+        errMsg = msg.errorMessage;
+      } else if (typeof data.errorMessage === "string" && data.errorMessage !== "") {
+        errMsg = data.errorMessage;
+      }
+      if (errMsg !== null) {
+        emitServerError(errMsg);
         continue;
       }
       if (data.error || data.code === "error" || msg.method === "error") {
-        var errMsg = String(data.error || data.message || "unknown_error");
-        // 识别常见错误码
-        if (errMsg.indexOf("password") >= 0 || errMsg.indexOf("密码") >= 0) {
-          emit("error", { message: "password_error", error: errMsg });
-        } else if (errMsg.indexOf("not found") >= 0 ||
-                   errMsg.indexOf("不存在") >= 0 ||
-                   errMsg.indexOf("room not exist") >= 0) {
-          emit("error", { message: "room_not_found", error: errMsg });
-        } else {
-          emit("error", { message: "server_error", error: errMsg });
-        }
+        emitServerError(String(data.error || data.message || "unknown_error"));
         continue;
       }
+
+      // 关键：服务端广播/响应统一为 RoomResponse 格式
+      // { timestamp, Room: {...} }（go-server ws.go），房间数据嵌套在 data.Room，
+      // 不展开则成员永远读不到 currentTime/paused 等播放状态
+      if (data.Room && typeof data.Room === "object" && !Array.isArray(data.Room)) {
+        data = data.Room;
+      }
+
       if (msg.method === "/room/update" ||
           msg.method === "/room/update_member" ||
           msg.method === "/room/join") {
