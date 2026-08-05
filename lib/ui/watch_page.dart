@@ -54,6 +54,10 @@ class _WatchPageState extends State<WatchPage> {
   Timer? _videoCheckTimer;
   bool _videoTimeout = false;
 
+  // 调试浮层：长按 WebView 显示诊断信息（URL/iframe/video/VtLite 状态）
+  bool _showDebug = false;
+  String _debugInfo = '采集中...';
+
   @override
   void initState() {
     super.initState();
@@ -191,6 +195,55 @@ class _WatchPageState extends State<WatchPage> {
     } catch (_) {
       return null;
     }
+  }
+
+  /// 采集页面诊断信息：URL、iframe 数量、video 位置/尺寸、VtLite 状态
+  Future<void> _collectDebugInfo() async {
+    final js = '''
+(function(){
+  var out = [];
+  out.push("URL: " + location.href);
+  out.push("readyState: " + document.readyState);
+  // 主 frame video
+  var v = document.querySelector("video");
+  out.push("主frame video: " + (v ? (v.videoWidth + "x" + v.videoHeight + " ready=" + v.readyState + " paused=" + v.paused + " src=" + (v.currentSrc||v.src||"无")) : "无"));
+  // iframe 数量与同源访问
+  var fs = document.querySelectorAll("iframe");
+  out.push("iframe 数量: " + fs.length);
+  for (var i = 0; i < fs.length; i++) {
+    var f = fs[i];
+    var info = "  iframe[" + i + "] src=" + (f.src||"无");
+    try {
+      var sv = f.contentDocument.querySelector("video");
+      if (sv) info += " | video: " + sv.videoWidth + "x" + sv.videoHeight + " ready=" + sv.readyState;
+      else info += " | video: 无";
+    } catch(e) { info += " | 跨域无法访问"; }
+    out.push(info);
+  }
+  // VtLite 状态
+  var vt = window.VtLite;
+  if (vt) {
+    out.push("VtLite: 存在, createRoom=" + (typeof vt.createRoom) + ", _isFrameAgent=" + !!vt._isFrameAgent);
+    try {
+      var st = vt.getState ? vt.getState() : null;
+      if (st) out.push("VtLite state: " + JSON.stringify(st));
+    } catch(e) { out.push("VtLite state 读取失败: " + e); }
+  } else {
+    out.push("VtLite: 不存在");
+  }
+  return out.join("\\n");
+})()
+''';
+    final result = await _evalJs(js);
+    final s = result?.toString() ?? 'null';
+    // evaluateJavascript 返回 JSON 编码字符串（带引号），去掉首尾引号
+    var cleaned = s;
+    if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
+      cleaned = cleaned.substring(1, cleaned.length - 1);
+      // 反转义
+      cleaned = cleaned.replaceAll('\\n', '\n').replaceAll('\\"', '"');
+    }
+    if (mounted) setState(() => _debugInfo = cleaned);
   }
 
   @override
@@ -400,6 +453,58 @@ class _WatchPageState extends State<WatchPage> {
                       _buildVideoTimeoutOverlay(),
                     if (isConnecting && store.room == null)
                       _buildConnectingOverlay(),
+                    // 调试按钮：右下角小圆点，点击采集诊断信息
+                    Positioned(
+                      right: 12,
+                      bottom: 80,
+                      child: GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _showDebug = !_showDebug;
+                            _debugInfo = '采集中...';
+                          });
+                          if (_showDebug) _collectDebugInfo();
+                        },
+                        child: Container(
+                          width: 28,
+                          height: 28,
+                          decoration: BoxDecoration(
+                            color: Colors.black54,
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: const Icon(
+                            Icons.bug_report,
+                            color: Colors.white,
+                            size: 16,
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (_showDebug)
+                      Positioned(
+                        left: 12,
+                        right: 12,
+                        bottom: 120,
+                        child: Container(
+                          constraints: const BoxConstraints(maxHeight: 300),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.black87,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: SingleChildScrollView(
+                            child: SelectableText(
+                              _debugInfo,
+                              style: const TextStyle(
+                                color: Colors.greenAccent,
+                                fontSize: 11,
+                                fontFamily: 'monospace',
+                                height: 1.4,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),
