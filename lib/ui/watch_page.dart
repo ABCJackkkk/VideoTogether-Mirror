@@ -142,11 +142,13 @@ class _WatchPageState extends State<WatchPage> {
     _videoCheckTimer?.cancel();
     _videoTimeout = false;
     var tries = 0;
-    // 检测 video 是否有画面：videoWidth > 0 表示已解码出帧
-    const js = '(function(){var v=document.querySelector("video");'
-        'if(!v) return "none";'
-        'if(v.videoWidth>0||v.readyState>=2) return "playing";'
-        'return "empty";})()';
+    // 检测 video 是否有画面：递归查找 iframe（含同源子 frame），videoWidth>0 表示已出帧
+    const js = '(function(){function find(d){try{var v=d.querySelector("video");'
+        'if(v)return v;var fs=d.querySelectorAll("iframe");'
+        'for(var i=0;i<fs.length;i++){try{var s=fs[i].contentDocument;'
+        'if(s){v=find(s);if(v)return v;}}catch(e){}}}catch(e){}return null}'
+        'var v=find(document);if(!v)return "none";'
+        'if(v.videoWidth>0||v.readyState>=2)return "playing";return "empty";})()';
     _videoCheckTimer = Timer.periodic(const Duration(milliseconds: 500), (t) {
       if (!mounted) {
         t.cancel();

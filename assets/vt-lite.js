@@ -478,6 +478,28 @@
   }
 
   // ===== video 元素轮询 =====
+  // 递归查找 video 元素，遍历同源 iframe（跨域 iframe contentDocument 无法访问，
+  // try-catch 跳过）。VT 原版靠油猴 @match *://*/* 在每个 iframe 注入，
+  // 我们用递归同源查找模拟，覆盖绝大多数影视站播放器 iframe 场景。
+  function findVideoDeep(doc) {
+    doc = doc || document;
+    try {
+      var v = doc.querySelector("video");
+      if (v) return v;
+      var iframes = doc.querySelectorAll("iframe");
+      for (var i = 0; i < iframes.length; i++) {
+        try {
+          var sub = iframes[i].contentDocument;
+          if (sub) {
+            v = findVideoDeep(sub);
+            if (v) return v;
+          }
+        } catch (e) {} // 跨域 iframe，跳过
+      }
+    } catch (e) {}
+    return null;
+  }
+
   // 当 createRoom/joinRoom 时 video 尚未出现，启动轮询自动绑定
   function startVideoPolling() {
     stopVideoPolling();
@@ -486,7 +508,7 @@
         stopVideoPolling();
         return;
       }
-      var el = document.querySelector("video");
+      var el = findVideoDeep(document);
       if (el) {
         videoElement = el;
         stopVideoPolling();
