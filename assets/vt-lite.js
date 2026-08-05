@@ -32,7 +32,10 @@
 //   - 不自动重连（由 Dart 侧决定）
 //   - 所有回调 try/catch 包裹，单个监听器报错不影响其他
 (function () {
-  if (typeof window !== "undefined" && window.VtLite) return; // 防止重复注入
+  // 防止重复注入：只有完整 VtLite（含 createRoom 等方法）才跳过
+  // 子 frame 代理标记的 {_isFrameAgent:true} 不算完整 VtLite，主 frame 兜底注入时需要覆盖
+  if (typeof window !== "undefined" && window.VtLite &&
+      typeof window.VtLite.createRoom === "function") return;
 
   // ===== 主/子 frame 判断 =====
   // VT 原版靠油猴 @match *://*/* 在每个 iframe 注入脚本；

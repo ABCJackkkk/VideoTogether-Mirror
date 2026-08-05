@@ -109,6 +109,14 @@ class VTWebViewBridge implements VTBridge {
 
   @override
   Future<Room> createRoom({required String name, String password = ''}) async {
+    // 先确认 VtLite 已就绪，否则给明确错误而不是挂起
+    final ready = await _eval(
+      'typeof window.VtLite === "object" && '
+      'typeof window.VtLite.createRoom === "function"',
+    );
+    if (ready != true && ready != 'true') {
+      throw StateError('VtLite 未注入，请重试或检查网络');
+    }
     await _eval(
       'window.VtLite.createRoom('
       '${_jsStr(name)}, ${_jsStr(password)}, '
@@ -126,6 +134,14 @@ class VTWebViewBridge implements VTBridge {
 
   @override
   Future<Room> joinRoom({required String name, String password = ''}) async {
+    // 先确认 VtLite 已就绪，否则给明确错误而不是挂起
+    final ready = await _eval(
+      'typeof window.VtLite === "object" && '
+      'typeof window.VtLite.joinRoom === "function"',
+    );
+    if (ready != true && ready != 'true') {
+      throw StateError('VtLite 未注入，请重试或检查网络');
+    }
     await _eval(
       'window.VtLite.joinRoom('
       '${_jsStr(name)}, ${_jsStr(password)}, '

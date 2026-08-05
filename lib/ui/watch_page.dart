@@ -270,8 +270,11 @@ class _WatchPageState extends State<WatchPage> {
                           UserScript(
                             groupName: 'vt-lite',
                             source: _vtJs!,
+                            // AT_DOCUMENT_END：等 DOM 解析完再注入，
+                            // AT_DOCUMENT_START 时 document.body 可能不存在，
+                            // vt-lite.js 里的 setInterval/DOM 操作会失败
                             injectionTime:
-                                UserScriptInjectionTime.AT_DOCUMENT_START,
+                                UserScriptInjectionTime.AT_DOCUMENT_END,
                             forMainFrameOnly: false,
                           ),
                         ]),
