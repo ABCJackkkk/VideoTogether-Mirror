@@ -13,7 +13,8 @@ class AppWebViewController {
   /// 由 InAppWebView widget 的 onCreate 回调注入
   void attach(InAppWebViewController controller) {
     _raw = controller;
-    // 桌面 UA，规避移动端反爬
+    // 桌面 UA + 移除 WebView 特征头（X-Requested-With），让网页（B站/腾讯等）
+    // 无法识别是内嵌浏览器，表现与真实浏览器一致
     controller.setSettings(
       settings: InAppWebViewSettings(
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -22,6 +23,10 @@ class AppWebViewController {
         mediaPlaybackRequiresUserGesture: false,
         allowFileAccessFromFileURLs: true,
         allowUniversalAccessFromFileURLs: true,
+        // 空白名单 = 所有请求都不带 X-Requested-With（WebView 特征头）
+        requestedWithHeaderOriginAllowList: <String>{},
+        // 允许混合内容（部分视频站资源走 http）
+        mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
       ),
     );
     // 注册缓存的 handler
