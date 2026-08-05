@@ -739,7 +739,12 @@
 
   // ===== 公开 API =====
 
-  async function createRoom(name, pwd, videoEl, nickname) {
+  // 重要：这里必须是同步函数（非 async）。
+  // Flutter WebView 的 evaluateJavascript 不会等待 JS Promise 完成，
+  // async function 返回的 Promise 会被 evaluateJavascript 直接丢弃为 null，
+  // 导致 Dart 侧拿到返回值时内部状态（role/roomName）还没初始化。
+  // syncTime/connectWs 内部异步跑，结果通过事件流回传给 Dart。
+  function createRoom(name, pwd, videoEl, nickname) {
     if (!name) throw new Error("room name required");
     destroyed = false;
     stopMasterTimer();
@@ -752,16 +757,14 @@
     joinSucceeded = false;
     joinRetryCount = 0;
     if (nickname) senderName = String(nickname);
-    // syncTime 与 connectWs 并行：减少房间初始化延迟
-    // （syncTime 失败不阻塞，timeOffset 保持 0）
-    var syncP = syncTime();
+    // syncTime 后台跑，timeOffset 算好就用，算不出就 0，不阻塞
+    syncTime().catch(function () {});
     if (!ws) connectWs(0);
     startMasterTimer();
     if (!videoElement) startVideoPolling();
-    await syncP;
   }
 
-  async function joinRoom(name, pwd, videoEl, nickname) {
+  function joinRoom(name, pwd, videoEl, nickname) {
     if (!name) throw new Error("room name required");
     destroyed = false;
     stopMasterTimer();
@@ -774,14 +777,13 @@
     joinSucceeded = false;
     joinRetryCount = 0;
     if (nickname) senderName = String(nickname);
-    // syncTime 与 connectWs 并行
-    var syncP = syncTime();
+    // syncTime 后台跑
+    syncTime().catch(function () {});
     if (!ws) connectWs(0);
     // join 由 startMemberTimer 驱动：WS open 后立即发 join，
     // 之后每 2 秒重试直到成功（对照 VT 原版 ScheduledTask）
     startMemberTimer();
     if (!videoElement) startVideoPolling();
-    await syncP;
   }
 
   function leaveRoom() {

@@ -680,17 +680,35 @@ class _AutoFollowHostUrl extends StatefulWidget {
 
 class _AutoFollowHostUrlState extends State<_AutoFollowHostUrl> {
   String? _lastFollowedUrl;
+  String? _lastSeenUrl;
 
   @override
   void initState() {
     super.initState();
+    // 监听 RoomStore 变化：room.url 改变时触发跳转
+    widget.store.addListener(_onStoreChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkFollow());
   }
 
   @override
   void didUpdateWidget(covariant _AutoFollowHostUrl oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.store.room?.url != widget.store.room?.url) {
+    if (oldWidget.store != widget.store) {
+      oldWidget.store.removeListener(_onStoreChanged);
+      widget.store.addListener(_onStoreChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.store.removeListener(_onStoreChanged);
+    super.dispose();
+  }
+
+  void _onStoreChanged() {
+    final url = widget.store.room?.url;
+    if (url != _lastSeenUrl) {
+      _lastSeenUrl = url;
       _checkFollow();
     }
   }
@@ -699,7 +717,10 @@ class _AutoFollowHostUrlState extends State<_AutoFollowHostUrl> {
     final hostUrl = widget.store.room?.url;
     if (hostUrl == null || hostUrl.isEmpty) return;
     if (hostUrl.startsWith('file://')) return;
-    if (hostUrl == widget.currentLoadedUrl) return;
+    // about:blank 或空 URL 时，首次跟随房主必须执行
+    final current = widget.currentLoadedUrl;
+    final isBlank = current.isEmpty || current == 'about:blank';
+    if (!isBlank && hostUrl == current) return;
     if (hostUrl == _lastFollowedUrl) return;
     _lastFollowedUrl = hostUrl;
     widget.onFollow(hostUrl);
