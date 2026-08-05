@@ -65,3 +65,6 @@ site/tsconfig.node.tsbuildinfo
 
 # 构建用 Gradle 缓存（沙箱重定向，体积大不入库）
 .gradle-cache/
+
+# 构建用 Pub 缓存（沙箱重定向）
+.pub-cache/

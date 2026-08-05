@@ -238,7 +238,7 @@ class _HomePageState extends State<HomePage>
                                       decoration: _fieldDecoration(
                                         labelText: '视频网址',
                                         hintText:
-                                            '粘贴 B站 / YouTube 等视频网页地址',
+                                            '视频直链（.mp4）最稳定；B站/腾讯网页可能被限制',
                                       ),
                                       style: const TextStyle(
                                         color: _kTextPrimary,

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:provider/provider.dart';
@@ -42,6 +44,10 @@ class _WatchPageState extends State<WatchPage> {
   String? _localVideoHtml;
   String? _localVideoBaseUrl;
   bool _roomInited = false;
+
+  // 黑屏诊断：进房后轮询页面是否有 <video>，超时给出引导提示
+  Timer? _videoCheckTimer;
+  bool _videoTimeout = false;
 
   @override
   void initState() {
@@ -118,6 +124,8 @@ class _WatchPageState extends State<WatchPage> {
         await store.joinRoom(
             name: widget.roomName, password: widget.password);
       }
+      // 进房成功后启动"是否有可播放视频"检测，黑屏时给出引导
+      _startVideoCheck();
     } catch (e) {
       _errorHandled = true;
       if (!mounted) return;
@@ -127,8 +135,43 @@ class _WatchPageState extends State<WatchPage> {
     }
   }
 
+  /// 每 500ms 检查页面是否出现 <video>；10 秒超时提示用户。
+  /// 网页被反爬/加载失败时成员侧会一直黑屏，必须有可见的引导。
+  void _startVideoCheck() {
+    _videoCheckTimer?.cancel();
+    _videoTimeout = false;
+    var tries = 0;
+    _videoCheckTimer = Timer.periodic(const Duration(milliseconds: 500), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      _evalJs('!!document.querySelector("video")').then((has) {
+        if (has == true || has == 'true') {
+          t.cancel();
+          if (_videoTimeout && mounted) setState(() => _videoTimeout = false);
+          return;
+        }
+        tries++;
+        if (tries >= 20) {
+          t.cancel();
+          if (mounted) setState(() => _videoTimeout = true);
+        }
+      });
+    });
+  }
+
+  Future<dynamic> _evalJs(String js) async {
+    try {
+      return await _webviewCtrl.evaluateJavascript(js);
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   void dispose() {
+    _videoCheckTimer?.cancel();
     _store?.removeListener(_onStoreChanged);
     // 返回/退出时主动离开房间：停止上报/心跳定时器、断开 WS，
     // 避免残留连接继续占用房间或反复重连
@@ -240,7 +283,18 @@ class _WatchPageState extends State<WatchPage> {
                         await _initRoom();
                       },
                       onReceivedError: (controller, request, error) async {
-                        // 加载失败时仍尝试注入 JS（initialData 空白页可注入）
+                        // 已进房后页面加载失败（如跟随房主跳转的网页打不开）：
+                        // 明确提示，避免成员侧一直黑屏无反馈
+                        if (_loaded && _roomInited && mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('房主视频页面加载失败。建议双方改用视频直链（.mp4 地址）或本地文件，B站/腾讯网页在 App 内可能被限制。'),
+                              duration: Duration(seconds: 5),
+                            ),
+                          );
+                          return;
+                        }
+                        // 初始页加载失败时仍尝试注入 JS（initialData 空白页可注入）
                         // 保证加入方/本地视频方房间流程能继续
                         if (_loaded) return;
                         _loaded = true;
@@ -288,6 +342,8 @@ class _WatchPageState extends State<WatchPage> {
                         onSend: (text) => store.sendMessage(text),
                       ),
                     ),
+                    if (_videoTimeout && store.room != null)
+                      _buildVideoTimeoutOverlay(),
                     if (isConnecting && store.room == null)
                       _buildConnectingOverlay(),
                   ],
@@ -366,6 +422,71 @@ class _WatchPageState extends State<WatchPage> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// 进房成功但 10 秒内页面没有出现可播放视频（黑屏）时的引导层
+  Widget _buildVideoTimeoutOverlay() {
+    return Container(
+      color: const Color(0xCCF7F5F2),
+      child: Center(
+        child: Container(
+          margin: const EdgeInsets.all(32),
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFFFFF),
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x22000000),
+                blurRadius: 16,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.live_tv, size: 40, color: Color(0xFF8B7355)),
+              const SizedBox(height: 12),
+              const Text(
+                '未检测到可播放视频',
+                style: TextStyle(
+                  color: Color(0xFF2C2C2C),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                '已连上房间，但网页视频可能被网站限制（B站/腾讯等）。\n'
+                '建议双方改用视频直链（.mp4 地址）或本地文件，同步最稳定。',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Color(0xFF6B6B6B),
+                  fontSize: 13,
+                  height: 1.6,
+                ),
+              ),
+              const SizedBox(height: 16),
+              OutlinedButton(
+                onPressed: () => setState(() => _videoTimeout = false),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Color(0xFF8B7355)),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 10,
+                  ),
+                ),
+                child: const Text(
+                  '知道了',
+                  style: TextStyle(color: Color(0xFF8B7355), fontSize: 14),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
