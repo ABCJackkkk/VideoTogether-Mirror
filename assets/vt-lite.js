@@ -82,24 +82,42 @@
     // 定期上报（即使没有事件触发）
     setInterval(postAgentState, 1000);
 
-    // 监听主 frame 的控制指令
-    window.addEventListener("message", function (e) {
-      if (!e.data || e.data.source !== "vt-lite-master") return;
-      if (!agentVideo) return;
+    // 向子 iframe 转发消息（嵌套 iframe 场景）
+    function forwardToChildren(msg) {
       try {
-        var cmd = e.data;
-        if (cmd.type === "control") {
-          if (cmd.action === "seek" && typeof cmd.value === "number") {
-            agentVideo.currentTime = cmd.value;
-          } else if (cmd.action === "pause") {
-            agentVideo.pause();
-          } else if (cmd.action === "play") {
-            agentVideo.play().catch(function () {});
-          } else if (cmd.action === "rate" && typeof cmd.value === "number") {
-            agentVideo.playbackRate = cmd.value;
+        var fs = document.querySelectorAll("iframe");
+        for (var i = 0; i < fs.length; i++) {
+          try { fs[i].contentWindow.postMessage(msg, "*"); } catch (e) {}
+        }
+      } catch (e) {}
+    }
+
+    // 监听消息：主 frame 控制指令（执行+向下转发）/ 孙 frame 状态（向上转发）
+    window.addEventListener("message", function (e) {
+      if (!e.data || !e.data.source) return;
+      try {
+        if (e.data.source === "vt-lite-master") {
+          forwardToChildren(e.data); // 先转发给孙 frame（嵌套场景）
+          if (!agentVideo) return;
+          var cmd = e.data;
+          if (cmd.type === "control") {
+            if (cmd.action === "seek" && typeof cmd.value === "number") {
+              agentVideo.currentTime = cmd.value;
+            } else if (cmd.action === "pause") {
+              agentVideo.pause();
+            } else if (cmd.action === "play") {
+              agentVideo.play().catch(function () {});
+            } else if (cmd.action === "rate" && typeof cmd.value === "number") {
+              agentVideo.playbackRate = cmd.value;
+            }
+          } else if (cmd.type === "query_state") {
+            postAgentState();
           }
-        } else if (cmd.type === "query_state") {
-          postAgentState();
+        } else if (e.data.source === "vt-lite-agent") {
+          // 孙 frame 上报的状态：转发给父 frame，直到主 frame
+          try {
+            window.parent.postMessage(e.data, "*");
+          } catch (err2) {}
         }
       } catch (err) {}
     });

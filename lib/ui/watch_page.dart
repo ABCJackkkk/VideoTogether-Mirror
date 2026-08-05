@@ -167,8 +167,10 @@ class _WatchPageState extends State<WatchPage> {
         return;
       }
       _evalJs(js).then((result) {
+        // evaluateJavascript 返回 JSON 编码字符串："playing" 带引号，
+        // 用 contains 宽松匹配避免误判
         final s = result?.toString() ?? '';
-        if (s == 'playing') {
+        if (s.contains('playing')) {
           t.cancel();
           if (_videoTimeout && mounted) setState(() => _videoTimeout = false);
           return;
