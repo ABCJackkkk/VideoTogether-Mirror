@@ -135,25 +135,33 @@ class _WatchPageState extends State<WatchPage> {
     }
   }
 
-  /// 每 500ms 检查页面是否出现 <video>；10 秒超时提示用户。
-  /// 网页被反爬/加载失败时成员侧会一直黑屏，必须有可见的引导。
+  /// 每 500ms 检查页面是否有可播放视频（video 元素且有画面）；15 秒超时提示。
+  /// 影视站（如 laifu8）需用户点击选集才加载视频，仅检测 video 存在会漏判黑屏：
+  /// video 标签在但 videoWidth=0（没画面）时仍需引导用户点击播放。
   void _startVideoCheck() {
     _videoCheckTimer?.cancel();
     _videoTimeout = false;
     var tries = 0;
+    // 检测 video 是否有画面：videoWidth > 0 表示已解码出帧
+    const js = '(function(){var v=document.querySelector("video");'
+        'if(!v) return "none";'
+        'if(v.videoWidth>0||v.readyState>=2) return "playing";'
+        'return "empty";})()';
     _videoCheckTimer = Timer.periodic(const Duration(milliseconds: 500), (t) {
       if (!mounted) {
         t.cancel();
         return;
       }
-      _evalJs('!!document.querySelector("video")').then((has) {
-        if (has == true || has == 'true') {
+      _evalJs(js).then((result) {
+        final s = result?.toString() ?? '';
+        if (s == 'playing') {
           t.cancel();
           if (_videoTimeout && mounted) setState(() => _videoTimeout = false);
           return;
         }
         tries++;
-        if (tries >= 20) {
+        // 15 秒（30 次）后超时；影视站加载慢，比 10 秒宽裕
+        if (tries >= 30) {
           t.cancel();
           if (mounted) setState(() => _videoTimeout = true);
         }
@@ -211,6 +219,13 @@ class _WatchPageState extends State<WatchPage> {
                     _roomInited = false;
                     _bridge.reset();
                     final messenger = ScaffoldMessenger.of(context);
+                    // 提示加入方：影视站可能需手动点击播放/选集
+                    messenger.showSnackBar(
+                      const SnackBar(
+                        content: Text('正在加载房主视频页…如未自动播放请点击网页中的播放按钮或选集'),
+                        duration: Duration(seconds: 4),
+                      ),
+                    );
                     try {
                       await _webviewCtrl.loadUrl(hostUrl);
                     } catch (e) {
@@ -461,8 +476,9 @@ class _WatchPageState extends State<WatchPage> {
               ),
               const SizedBox(height: 8),
               const Text(
-                '已连上房间，但网页视频可能被网站限制（B站/腾讯等）。\n'
-                '建议双方改用视频直链（.mp4 地址）或本地文件，同步最稳定。',
+                '已连上房间，但视频还没开始播放。\n'
+                '请尝试点击网页中的播放按钮或选集；\n'
+                '若仍不行，建议双方改用视频直链（.mp4）或本地文件。',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: Color(0xFF6B6B6B),
