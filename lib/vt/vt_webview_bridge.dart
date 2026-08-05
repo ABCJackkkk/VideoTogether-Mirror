@@ -112,7 +112,7 @@ class VTWebViewBridge implements VTBridge {
     await _eval(
       'window.VtLite.createRoom('
       '${_jsStr(name)}, ${_jsStr(password)}, '
-      'document.querySelector("video"), ${_jsStr(nickname)}'
+      'null, ${_jsStr(nickname)}'
       ')',
     );
     // VtLite.createRoom 返回 void，构造 Room 由本地完成
@@ -129,7 +129,7 @@ class VTWebViewBridge implements VTBridge {
     await _eval(
       'window.VtLite.joinRoom('
       '${_jsStr(name)}, ${_jsStr(password)}, '
-      'document.querySelector("video"), ${_jsStr(nickname)}'
+      'null, ${_jsStr(nickname)}'
       ')',
     );
     // VtLite.joinRoom 返回 void，房间状态通过 room_update 事件异步到达

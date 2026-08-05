@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:collection' show UnmodifiableListView;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:provider/provider.dart';
 import 'package:videotogether/state/room_store.dart';
@@ -45,6 +47,9 @@ class _WatchPageState extends State<WatchPage> {
   String? _localVideoBaseUrl;
   bool _roomInited = false;
 
+  // vt-lite.js 内容：预加载后通过 initialUserScripts 注入到所有 frame（含 iframe）
+  String? _vtJs;
+
   // 黑屏诊断：进房后轮询页面是否有 <video>，超时给出引导提示
   Timer? _videoCheckTimer;
   bool _videoTimeout = false;
@@ -83,6 +88,13 @@ class _WatchPageState extends State<WatchPage> {
     }
 
     _currentLoadedUrl = widget.videoUrl;
+
+    // 预加载 vt-lite.js：通过 initialUserScripts(forMainFrameOnly:false) 注入到
+    // 所有 frame（含 iframe），子 frame 运行轻量代理脚本找 video 并 postMessage 上报，
+    // 主 frame 运行完整 VtLite 通过 postMessage 控制子 frame video（跨域也能工作）
+    rootBundle.loadString('assets/vt-lite.js').then((js) {
+      if (mounted) setState(() => _vtJs = js);
+    });
 
     // 仅绑定 bridge，不立即调用 createRoom/joinRoom：
     // 此时 WebView 尚未创建，VtLite JS 未注入，调用会静默失败。
@@ -247,8 +259,21 @@ class _WatchPageState extends State<WatchPage> {
               Expanded(
                 child: Stack(
                   children: [
-                    InAppWebView(
-                      initialUrlRequest:
+                    if (_vtJs != null)
+                      InAppWebView(
+                        // forMainFrameOnly:false → 脚本注入到所有 frame（含 iframe）
+                        // 子 frame 运行轻量代理找 video + postMessage 上报，
+                        // 主 frame 运行完整 VtLite 通过 postMessage 控制（跨域也能工作）
+                        initialUserScripts: UnmodifiableListView([
+                          UserScript(
+                            groupName: 'vt-lite',
+                            source: _vtJs!,
+                            injectionTime:
+                                UserScriptInjectionTime.AT_DOCUMENT_START,
+                            forMainFrameOnly: false,
+                          ),
+                        ]),
+                        initialUrlRequest:
                           (widget.isLocalVideo || widget.videoUrl.isEmpty)
                               ? null
                               : URLRequest(url: WebUri(widget.videoUrl)),
@@ -331,7 +356,14 @@ class _WatchPageState extends State<WatchPage> {
                         }
                         return NavigationActionPolicy.ALLOW;
                       },
-                    ),
+                    )
+                    else
+                      const Center(
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Color(0xFF8B7355),
+                        ),
+                      ),
                     if (_loading)
                       Positioned(
                         top: 0,

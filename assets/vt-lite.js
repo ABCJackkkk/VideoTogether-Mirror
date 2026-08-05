@@ -34,6 +34,83 @@
 (function () {
   if (typeof window !== "undefined" && window.VtLite) return; // 防止重复注入
 
+  // ===== 主/子 frame 判断 =====
+  // VT 原版靠油猴 @match *://*/* 在每个 iframe 注入脚本；
+  // 这里用 initialUserScripts(forMainFrameOnly:false) 模拟，
+  // 脚本会在所有 frame 执行，通过 postMessage 跨域通信。
+  var isMainFrame = false;
+  try { isMainFrame = (window.top === window); } catch (e) {}
+
+  // ===== 子 frame 代理：找 video → 上报状态 → 接收控制 =====
+  // 不运行完整 VtLite，只做 video 代理，跨域也能工作
+  if (!isMainFrame) {
+    var agentVideo = null;
+    var agentPollTimer = setInterval(function () {
+      var v = document.querySelector("video");
+      if (v !== agentVideo) {
+        agentVideo = v;
+        if (agentVideo) {
+          attachAgentEvents();
+          postAgentState();
+        }
+      }
+    }, 500);
+
+    function attachAgentEvents() {
+      if (!agentVideo) return;
+      ["play", "pause", "seeked", "ratechange", "loadedmetadata", "timeupdate", "waiting", "playing"].forEach(function (ev) {
+        try { agentVideo.addEventListener(ev, postAgentState); } catch (e) {}
+      });
+    }
+
+    function postAgentState() {
+      if (!agentVideo) return;
+      try {
+        window.parent.postMessage({
+          source: "vt-lite-agent",
+          type: "video_state",
+          currentTime: agentVideo.currentTime || 0,
+          paused: !!agentVideo.paused,
+          duration: agentVideo.duration || 0,
+          playbackRate: agentVideo.playbackRate || 1,
+          videoWidth: agentVideo.videoWidth || 0,
+          readyState: agentVideo.readyState || 0
+        }, "*");
+      } catch (e) {}
+    }
+
+    // 定期上报（即使没有事件触发）
+    setInterval(postAgentState, 1000);
+
+    // 监听主 frame 的控制指令
+    window.addEventListener("message", function (e) {
+      if (!e.data || e.data.source !== "vt-lite-master") return;
+      if (!agentVideo) return;
+      try {
+        var cmd = e.data;
+        if (cmd.type === "control") {
+          if (cmd.action === "seek" && typeof cmd.value === "number") {
+            agentVideo.currentTime = cmd.value;
+          } else if (cmd.action === "pause") {
+            agentVideo.pause();
+          } else if (cmd.action === "play") {
+            agentVideo.play().catch(function () {});
+          } else if (cmd.action === "rate" && typeof cmd.value === "number") {
+            agentVideo.playbackRate = cmd.value;
+          }
+        } else if (cmd.type === "query_state") {
+          postAgentState();
+        }
+      } catch (err) {}
+    });
+
+    // 标记已注入（防止主 frame 重复注入完整 VtLite）
+    window.VtLite = { _isFrameAgent: true };
+    return;
+  }
+
+  // ===== 以下为主 frame 逻辑（完整 VtLite） =====
+
   var API_HOST = "https://vt.panghair.com:5000";
   var WS_URLS = [
     "wss://vt.panghair.com:5000/ws?language=zh-cn",
@@ -54,9 +131,51 @@
   var masterTimer = null;       // 房主上报循环 setInterval 句柄
   var memberTimer = null;       // 成员心跳循环 setInterval 句柄
   var videoPollTimer = null;    // video 元素轮询定时器
-  var videoElement = null;      // 当前绑定的 video 元素
+  var videoElement = null;      // 当前绑定的 video 元素（主 frame 直接引用或 null）
   var intentionalClose = false; // 主动关闭标志（leaveRoom/destroy 时置 true）
   var destroyed = false;
+
+  // ===== iframe 代理状态 =====
+  // 子 frame 通过 postMessage 上报的 video 状态，当 videoElement 为 null 时使用
+  var lastVideoState = null;    // {currentTime, paused, duration, playbackRate, videoWidth, readyState}
+  var hasRemoteVideo = false;   // 是否有子 frame 上报过 video
+
+  // 主 frame 监听子 frame 上报的 video 状态
+  window.addEventListener("message", function (e) {
+    if (!e.data || e.data.source !== "vt-lite-agent") return;
+    if (e.data.type === "video_state") {
+      lastVideoState = e.data;
+      if (!hasRemoteVideo) {
+        hasRemoteVideo = true;
+        // 子 frame 找到 video，停止主 frame 的轮询
+        stopVideoPolling();
+      }
+      // 如果主 frame 也没直接找到 video，用远程标记
+      if (!videoElement) {
+        videoElement = REMOTE_VIDEO_MARKER;
+      }
+    }
+  });
+
+  // 向所有子 frame 广播控制指令（跨域 iframe 也能收到）
+  function sendControl(action, value) {
+    try {
+      var frames = document.querySelectorAll("iframe");
+      for (var i = 0; i < frames.length; i++) {
+        try {
+          frames[i].contentWindow.postMessage({
+            source: "vt-lite-master",
+            type: "control",
+            action: action,
+            value: value
+          }, "*");
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
+
+  // 远程 video 标记对象：videoElement === REMOTE_VIDEO_MARKER 表示用 postMessage 控制
+  var REMOTE_VIDEO_MARKER = { _remote: true };
 
   // ===== 自动重连状态 =====
   // 连接断开（非主动）后，按指数退避重试：1s, 2s, 4s, 8s, 16s, 30s（封顶）
@@ -389,7 +508,16 @@
   // 构造一次 /room/update 上报负载。video 缺失时用默认值。
   function buildUpdatePayload() {
     var currentTime = 0, paused = true, playbackRate = 1, duration = 0;
-    if (videoElement) {
+    if (videoElement && videoElement._remote) {
+      // 远程 video（子 frame iframe）：从 postMessage 上报的状态读取
+      if (lastVideoState) {
+        currentTime = lastVideoState.currentTime || 0;
+        paused = !!lastVideoState.paused;
+        playbackRate = lastVideoState.playbackRate || 1;
+        duration = lastVideoState.duration || 0;
+      }
+    } else if (videoElement) {
+      // 主 frame 直接引用的 video 元素
       try {
         currentTime = videoElement.currentTime || 0;
         paused = !!videoElement.paused;
@@ -534,10 +662,10 @@
   // 守卫：仅当更新携带明确的播放字段时才动视频，避免 join 等不完整更新误伤
   on("room_update", function (room) {
     if (role !== ROLE.MEMBER || !videoElement || !room) return;
+    var isRemote = !!videoElement._remote;
     var v = videoElement;
     try {
       // 外推真实进度：realCurrent = currentTime + (now - lastUpdateServerTime) * rate
-      // lastUpdateServerTime 缺失或异常（<=0）时不外推，直接用 currentTime
       var hasValidTime = typeof room.currentTime === "number" &&
           typeof room.lastUpdateServerTime === "number" &&
           room.lastUpdateServerTime > 0;
@@ -545,25 +673,43 @@
         var realCurrent = room.currentTime;
         var lastServer = room.lastUpdateServerTime;
         var elapsed = Date.now() / 1000 + timeOffset - lastServer;
-        // 仅在合理范围内外推（0~3600s），避免时间戳异常导致跳到几十亿秒
         if (elapsed >= 0 && elapsed < 3600) {
           realCurrent = room.currentTime + elapsed * (room.playbackRate || 1);
         }
-        if (typeof v.currentTime === "number" &&
+        // 远程 video：通过 postMessage seek；本地 video：直接设 currentTime
+        if (isRemote) {
+          var localTime = lastVideoState ? lastVideoState.currentTime : 0;
+          if (Math.abs(localTime - realCurrent) > 1) {
+            sendControl("seek", realCurrent);
+          }
+        } else if (typeof v.currentTime === "number" &&
             Math.abs(v.currentTime - realCurrent) > 1) {
           v.currentTime = realCurrent;
         }
       }
-      if (typeof room.paused === "boolean" && v.paused !== room.paused) {
-        if (room.paused) {
-          try { v.pause(); } catch (e) {}
-        } else {
-          try { v.play().catch(function () {}); } catch (e) {}
+      if (typeof room.paused === "boolean") {
+        if (isRemote) {
+          var localPaused = lastVideoState ? !!lastVideoState.paused : true;
+          if (localPaused !== room.paused) {
+            sendControl(room.paused ? "pause" : "play");
+          }
+        } else if (v.paused !== room.paused) {
+          if (room.paused) {
+            try { v.pause(); } catch (e) {}
+          } else {
+            try { v.play().catch(function () {}); } catch (e) {}
+          }
         }
       }
-      if (typeof room.playbackRate === "number" &&
-          v.playbackRate !== room.playbackRate) {
-        try { v.playbackRate = room.playbackRate; } catch (e) {}
+      if (typeof room.playbackRate === "number") {
+        if (isRemote) {
+          var localRate = lastVideoState ? lastVideoState.playbackRate : 1;
+          if (localRate !== room.playbackRate) {
+            sendControl("rate", room.playbackRate);
+          }
+        } else if (v.playbackRate !== room.playbackRate) {
+          try { v.playbackRate = room.playbackRate; } catch (e) {}
+        }
       }
     } catch (e) {
       emit("error", { message: "member_sync_error", error: String(e) });
