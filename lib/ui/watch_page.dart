@@ -47,7 +47,7 @@ class _WatchPageState extends State<WatchPage> {
   String? _localVideoBaseUrl;
   bool _roomInited = false;
 
-  // vt-lite.js 内容：预加载后通过 initialUserScripts 注入到所有 frame（含 iframe）
+  // VT 原版油猴脚本内容：预加载后通过 initialUserScripts 注入到所有 frame（含 iframe）
   String? _vtJs;
 
   // 黑屏诊断：进房后轮询页面是否有 <video>，超时给出引导提示
@@ -62,8 +62,8 @@ class _WatchPageState extends State<WatchPage> {
   void initState() {
     super.initState();
     _webviewCtrl = AppWebViewController();
-    final injector = VTInjector(js: _JsAdapter(_webviewCtrl));
-    _bridge = VTWebViewBridge(webview: _webviewCtrl, injector: injector)
+    // 原版脚本通过 initialUserScripts 自动注入，不需要 injector
+    _bridge = VTWebViewBridge(webview: _webviewCtrl)
       ..nickname = widget.nickname;
 
     if (widget.isLocalVideo && widget.videoUrl.isNotEmpty) {
@@ -93,10 +93,11 @@ class _WatchPageState extends State<WatchPage> {
 
     _currentLoadedUrl = widget.videoUrl;
 
-    // 预加载 vt-lite.js：通过 initialUserScripts(forMainFrameOnly:false) 注入到
-    // 所有 frame（含 iframe），子 frame 运行轻量代理脚本找 video 并 postMessage 上报，
-    // 主 frame 运行完整 VtLite 通过 postMessage 控制子 frame video（跨域也能工作）
-    rootBundle.loadString('assets/vt-lite.js').then((js) {
+    // 预加载 VT 原版油猴脚本（vt-original.user.js，@grant none，自包含 200KB）：
+    // 直接搬运 VT 原版，不再自己实现同步逻辑。原版自带 video 查找（支持跨域 iframe
+    // postMessage）、ScheduledTask 同步、WS 重连、浮动面板 UI。
+    // initialUserScripts(forMainFrameOnly:false, AT_DOCUMENT_END) 注入所有 frame。
+    rootBundle.loadString('assets/vt-original.user.js').then((js) {
       if (mounted) setState(() => _vtJs = js);
     });
 
