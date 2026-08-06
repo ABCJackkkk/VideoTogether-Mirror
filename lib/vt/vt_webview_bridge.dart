@@ -111,15 +111,20 @@ class VTWebViewBridge implements VTBridge {
     }
   }
 
-  /// 轮询 JS：一次性读取 extension 状态 + DOM 成员数
+  /// 轮询 JS：一次性读取 extension 状态 + 成员数
+  ///
+  /// 注意：原版 FlyPannel 的 #memberCount 元素在 shadow DOM 里，
+  /// document.querySelector 查不到，必须直接读 ext.ctxMemberCount 属性
+  /// （原版收到 /room/update_member 消息时更新，见 changeMemberCount）。
   static const String _pollJs = '''
 (function(){
   var ext = window.videoTogetherExtension;
   if (!ext || ext === null) return JSON.stringify({ready:false});
   var mc = 0;
   try {
-    var el = document.querySelector('#memberCount');
-    if (el) mc = parseInt(el.innerText.replace(/[^0-9]/g,'')) || 0;
+    var c = ext.ctxMemberCount;
+    if (typeof c === 'number') mc = c;
+    else mc = parseInt(c) || 0;
   } catch(e){}
   var wsOpen = false;
   try { wsOpen = !!ext.ctxWsIsOpen; } catch(e){}
